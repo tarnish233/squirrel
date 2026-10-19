@@ -28,13 +28,7 @@ patch:
   style/alpha: 0
 YAML
 
-swiftc -swift-version 5 -Onone -enable-bare-slash-regex \
-  -import-objc-header sources/Squirrel-Bridging-Header.h -I librime/src -I librime/include \
-  -L lib -lrime.1 -F Frameworks -framework Sparkle \
-  -framework AppKit -framework InputMethodKit -framework Carbon -framework UserNotifications \
-  -Xlinker -rpath -Xlinker "$root/lib" -Xlinker -rpath -Xlinker "$root/Frameworks" \
-  sources/{BridgingFunctions,InputSource,MacOSKeyCodes,ReservedProperty,SquirrelApplicationDelegate,SquirrelConfig,SquirrelInputController,SquirrelPanel,SquirrelScrollMode,SquirrelTheme,SquirrelView}.swift \
-  tests/scroll_mode/main.swift -o "$work/harness"
+bash tests/scroll_mode/build-harness.sh "$work/harness"
 
 HARNESS_USER_DIR="$work/user" HARNESS_LOG_DIR="$work/log" HARNESS_OUT_DIR="$work/out" \
 HARNESS_APP_DIR="$work" HARNESS_SHARED_DIR="$shared" "$work/harness"

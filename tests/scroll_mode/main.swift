@@ -21,6 +21,10 @@ func env(_ name: String) -> String {
   guard let value = ProcessInfo.processInfo.environment[name] else { fatalError("missing \(name)") }
   return value
 }
+let variant = ProcessInfo.processInfo.environment["HARNESS_VARIANT"] ?? ""
+
+/// Where the fake client reports its caret, in screen coordinates.
+var caretRect = NSRect(x: 300, y: 600, width: 1, height: 18)
 
 final class FakeClient: NSObject, IMKTextInput {
   var marked = ""
@@ -39,7 +43,7 @@ final class FakeClient: NSObject, IMKTextInput {
   func length() -> Int { 0 }
   func characterIndex(for point: NSPoint, tracking mappingMode: IMKLocationToOffsetMappingMode, inMarkedRange: UnsafeMutablePointer<ObjCBool>!) -> Int { 0 }
   func attributes(forCharacterIndex index: Int, lineHeightRectangle lineRect: UnsafeMutablePointer<NSRect>!) -> [AnyHashable: Any]! {
-    lineRect?.pointee = NSRect(x: 300, y: 600, width: 1, height: 18)
+    lineRect?.pointee = caretRect
     return [:]
   }
   func validAttributesForMarkedText() -> [Any]! { [] }
@@ -102,7 +106,8 @@ print("harness: starting")
 
 let rimeAPI: RimeApi_stdbool = rime_get_api_stdbool().pointee
 let app = NSApplication.shared
-app.setActivationPolicy(.prohibited)
+// The preview puts real windows on screen; the tests keep everything invisible.
+app.setActivationPolicy(variant == "preview" ? .accessory : .prohibited)
 let delegate = SquirrelApplicationDelegate()
 app.delegate = delegate
 
@@ -180,9 +185,115 @@ func snapshot(_ name: String) {
   print("  → \(url.lastPathComponent) \(Int(view.bounds.width))×\(Int(view.bounds.height))")
 }
 
+// MARK: - Preview
+
+/// A document with a picture beside it, so screenshots show how the panel background reads over
+/// text and over colorful content.
+final class BackdropView: NSView {
+  override var isFlipped: Bool { true }
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.textBackgroundColor.setFill()
+    bounds.fill()
+    let split = (bounds.width * 0.55).rounded()
+    let picture = NSRect(x: split, y: 20, width: bounds.width - split - 20, height: bounds.height - 40)
+    NSGradient(colors: [.systemPink, .systemOrange, .systemYellow, .systemGreen, .systemTeal, .systemBlue, .systemPurple])?
+      .draw(in: NSBezierPath(roundedRect: picture, xRadius: 16, yRadius: 16), angle: -50)
+    let style = NSMutableParagraphStyle()
+    style.lineSpacing = 7
+    style.paragraphSpacing = 10
+    let text = """
+      候选框预览 Candidate panel preview
+      落霞与孤鹜齐飞，秋水共长天一色。渔舟唱晚，响穷彭蠡之滨；雁阵惊寒，声断衡阳之浦。
+      The quick brown fox jumps over the lazy dog. 0123456789
+      遥襟甫畅，逸兴遄飞。爽籁发而清风生，纤歌凝而白云遏。睢园绿竹，气凌彭泽之樽；邺水朱华，光照临川之笔。四美具，二难并。穷睇眄于中天，极娱游于暇日。天高地迥，觉宇宙之无穷；兴尽悲来，识盈虚之有数。
+      """
+    NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
+      .draw(in: NSRect(x: 24, y: 20, width: split - 48, height: bounds.height - 40))
+  }
+}
+
+/// Shows the real panel over the backdrop and captures that screen region with screencapture,
+/// which includes the glass background that offscreen snapshots cannot render.
+func runPreview() {
+  let backdropFrame = NSRect(x: 240, y: 280, width: 900, height: 480)
+  let backdrop = NSWindow(contentRect: backdropFrame, styleMask: [.borderless], backing: .buffered, defer: false)
+  backdrop.level = .screenSaver
+  backdrop.hasShadow = false
+  backdrop.contentView = BackdropView()
+  // Show on whatever space is current, full-screen apps included.
+  backdrop.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+  panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+  backdrop.orderFrontRegardless()
+
+  /// Whether only this process's windows are visible in the region (CGWindowList is front to
+  /// back), so that a screenshot can never contain another app's content.
+  func onlyOwnWindows(in region: NSRect) -> Bool {
+    guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
+    let screenHeight = NSScreen.screens[0].frame.height
+    for window in windows {
+      guard let bounds = (window[kCGWindowBounds as String] as? NSDictionary).flatMap({ CGRect(dictionaryRepresentation: $0) }) else { continue }
+      let frame = NSRect(x: bounds.minX, y: screenHeight - bounds.maxY, width: bounds.width, height: bounds.height)
+      guard frame.intersects(region), (window[kCGWindowAlpha as String] as? Double ?? 1) > 0 else { continue }
+      guard (window[kCGWindowOwnerPID as String] as? Int32) == getpid() else { return false }
+      if (window[kCGWindowNumber as String] as? Int) == backdrop.windowNumber {
+        return frame.contains(region)
+      }
+    }
+    return false
+  }
+  caretRect = NSRect(x: backdropFrame.minX + 330, y: backdropFrame.maxY - 92, width: 1, height: 18)
+
+  func capture(_ name: String) {
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+    let caretLine = NSRect(x: caretRect.minX - 60, y: caretRect.minY, width: 60, height: caretRect.height)
+    let region = panel.frame.union(caretLine).insetBy(dx: -28, dy: -24).intersection(backdropFrame).integral
+    guard onlyOwnWindows(in: region) else {
+      print("  ✗ \(name) skipped: other windows are visible over the preview (another space or app in front?)")
+      failures += 1
+      return
+    }
+    // screencapture takes top-left based coordinates of the main display
+    let screenHeight = NSScreen.screens[0].frame.height
+    let url = outDir.appending(path: "\(name).png")
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    task.arguments = ["-x", "-R\(Int(region.minX)),\(Int(screenHeight - region.maxY)),\(Int(region.width)),\(Int(region.height))", url.path]
+    try? task.run()
+    task.waitUntilExit()
+    print("  → \(url.lastPathComponent) panel \(Int(panel.frame.width))×\(Int(panel.frame.height))")
+  }
+
+  for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+    print("== \(name)")
+    NSApp.appearance = NSAppearance(named: appearance)
+    backdrop.appearance = NSApp.appearance
+    backdrop.contentView?.needsDisplay = true
+    type("nihao")
+    capture("\(name)-1-nihao")
+    press(escape)
+    type("shi")
+    press(tab)
+    repeatPress(right, 2)
+    capture("\(name)-2-grid")
+    press(escape)
+    press(Key(chars: "R", code: kVK_ANSI_R, mods: [.shift]))
+    type("123")
+    capture("\(name)-3-comments")
+    press(escape)
+  }
+  panel.hide()
+  backdrop.orderOut(nil)
+  rimeAPI.finalize()
+  exit(failures == 0 ? 0 : 1)
+}
+
 // MARK: - Scenarios
 
-if ProcessInfo.processInfo.environment["HARNESS_VARIANT"] == "visual" {
+if variant == "preview" {
+  runPreview()
+}
+
+if variant == "visual" {
   print("== V1. phrases, preedit line and paging arrows")
   type("shishi")
   snapshot("visual-collapsed")
