@@ -16,6 +16,13 @@ final class SquirrelTheme {
   enum StatusMessageType: String {
     case long, short, mix
   }
+  /// Glass material of the translucent background on macOS 26 and later.
+  enum GlassStyle: String {
+    /// Frosted; keeps text readable over busy content.
+    case regular
+    /// More see-through.
+    case clear
+  }
   enum RimeColorSpace {
     case displayP3, sRGB
     static func from(name: String) -> Self {
@@ -58,11 +65,16 @@ final class SquirrelTheme {
   private(set) var borderWidth: CGFloat = 0
   private(set) var borderHeight: CGFloat = 0
   private(set) var linespace: CGFloat = 0
+  /// Space between candidates in the linear layout; two spaces of the candidate font if not set.
+  private(set) var candidateSpacing: CGFloat?
   private(set) var preeditLinespace: CGFloat = 0
   private(set) var baseOffset: CGFloat = 0
   private(set) var alpha: CGFloat = 1
 
   private(set) var translucency = false
+  private(set) var glassStyle = GlassStyle.clear
+  /// Opacity of the window background color laid over the glass by the native color scheme.
+  private(set) var glassOpacity: CGFloat = 0
   private(set) var mutualExclusive = false
   private(set) var linear = false
   private(set) var vertical = false
@@ -212,6 +224,8 @@ final class SquirrelTheme {
     inlinePreedit ?= config.getBool("style/inline_preedit")
     inlineCandidate ?= config.getBool("style/inline_candidate")
     translucency ?= config.getBool("style/translucency")
+    glassStyle ?= config.getString("style/glass_style").flatMap(GlassStyle.init(rawValue:))
+    glassOpacity ?= config.getDouble("style/glass_opacity").map { min(1, max(0, $0)) }
     mutualExclusive ?= config.getBool("style/mutual_exclusive")
     memorizeSize ?= config.getBool("style/memorize_size")
     showPaging ?= config.getBool("style/show_paging")
@@ -231,6 +245,7 @@ final class SquirrelTheme {
     borderHeight ?= config.getDouble("style/border_height")
     borderWidth ?= config.getDouble("style/border_width")
     linespace ?= config.getDouble("style/line_spacing")
+    candidateSpacing ?= config.getDouble("style/candidate_spacing").map { max(0, $0) }
     preeditLinespace ?= config.getDouble("style/spacing")
     baseOffset ?= config.getDouble("style/base_offset")
     shadowSize ?= config.getDouble("style/shadow_size").map { max(0, $0) }
@@ -274,6 +289,8 @@ final class SquirrelTheme {
         inlinePreedit ?= config.getBool("\(prefix)/inline_preedit")
         inlineCandidate ?= config.getBool("\(prefix)/inline_candidate")
         translucency ?= config.getBool("\(prefix)/translucency")
+        glassStyle ?= config.getString("\(prefix)/glass_style").flatMap(GlassStyle.init(rawValue:))
+        glassOpacity ?= config.getDouble("\(prefix)/glass_opacity").map { min(1, max(0, $0)) }
         mutualExclusive ?= config.getBool("\(prefix)/mutual_exclusive")
         showPaging ?= config.getBool("\(prefix)/show_paging")
         candidateFormat ?= config.getString("\(prefix)/candidate_format")
@@ -293,12 +310,22 @@ final class SquirrelTheme {
         borderHeight ?= config.getDouble("\(prefix)/border_height")
         borderWidth ?= config.getDouble("\(prefix)/border_width")
         linespace ?= config.getDouble("\(prefix)/line_spacing")
+        candidateSpacing ?= config.getDouble("\(prefix)/candidate_spacing").map { max(0, $0) }
         preeditLinespace ?= config.getDouble("\(prefix)/spacing")
         baseOffset ?= config.getDouble("\(prefix)/base_offset")
         shadowSize ?= config.getDouble("\(prefix)/shadow_size").map { max(0, $0) }
       }
     } else {
       available = false
+    }
+    if native && translucency {
+      // Let the glass (or blur) show through, optionally frosted with the window background color,
+      // and select like menus do: accent color, white text.
+      backgroundColor = glassOpacity > 0 ? Self.windowBackgroundColor(alpha: glassOpacity) : .clear
+      highlightedBackColor = .controlAccentColor
+      highlightedCandidateTextColor = .alternateSelectedControlTextColor
+      highlightedCandidateLabelColor = .alternateSelectedControlTextColor.withAlphaComponent(0.75)
+      highlightedCommentTextColor = .alternateSelectedControlTextColor.withAlphaComponent(0.75)
     }
 
     fonts = decodeFonts(from: fontName)
@@ -327,12 +354,43 @@ private extension SquirrelTheme {
     return NSFont.init(descriptor: fontDescriptor, size: size ?? fonts[0].pointSize)
   }
 
+  /// The window background color at an opacity, resolved for the appearance it is drawn in;
+  /// `withAlphaComponent` would fix it to the appearance current when the theme loads.
+  static func windowBackgroundColor(alpha: CGFloat) -> NSColor {
+    NSColor(name: nil) { appearance in
+      var color = NSColor.windowBackgroundColor
+      appearance.performAsCurrentDrawingAppearance {
+        color = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? color
+      }
+      return color.withAlphaComponent(alpha)
+    }
+  }
+
+  /// `system` is the system UI font: SF, falling back to the system CJK font (PingFang SC for
+  /// Simplified Chinese). `system-medium`, `system-semibold` etc. pick a weight.
+  static func systemFont(named name: String) -> NSFont? {
+    let parts = name.lowercased().split(separator: "-", maxSplits: 1).map(String.init)
+    guard parts.first == "system" else { return nil }
+    let weights: [String: NSFont.Weight] = [
+      "ultralight": .ultraLight, "thin": .thin, "light": .light, "regular": .regular, "medium": .medium,
+      "semibold": .semibold, "bold": .bold, "heavy": .heavy, "black": .black
+    ]
+    guard let weight = parts.count > 1 ? weights[parts[1]] : .regular else { return nil }
+    return NSFont.systemFont(ofSize: defaultFontSize, weight: weight)
+  }
+
   func decodeFonts(from fontString: String?) -> [NSFont] {
     guard let fontString = fontString else { return [] }
     var seenFontFamilies = Set<String>()
     let fontStrings = fontString.split(separator: ",")
     var fonts = [NSFont]()
     for string in fontStrings {
+      if let font = Self.systemFont(named: string.trimmingCharacters(in: .whitespaces)) {
+        if seenFontFamilies.insert("system").inserted {
+          fonts.append(font)
+        }
+        continue
+      }
       if let matchedFontName = try? /^\s*(.+)-([^-]+)\s*$/.firstMatch(in: string) {
         let family = String(matchedFontName.output.1)
         let style = String(matchedFontName.output.2)

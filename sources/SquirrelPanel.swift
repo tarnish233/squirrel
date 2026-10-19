@@ -281,7 +281,12 @@ final class SquirrelPanel: NSPanel {
         line.addAttribute(.noBreak, value: true, range: NSRange(location: 1, length: line.length-1))
       }
 
-      let lineSeparator = NSAttributedString(string: linear ? "  " : "\n", attributes: attrs)
+      let lineSeparator = if linear, let spacing = theme.candidateSpacing {
+        // One space stretched to the configured width (the highlight takes half of it on each side).
+        NSAttributedString(string: " ", attributes: attrs.merging([.kern: spacing - (" " as NSString).size(withAttributes: attrs).width]) { $1 })
+      } else {
+        NSAttributedString(string: linear ? "  " : "\n", attributes: attrs)
+      }
       if i > 0 {
         if scroll != nil {
           // Rows break with a line separator, staying in one paragraph like wrapped linear text;
@@ -557,6 +562,11 @@ private extension SquirrelPanel {
       backFrame.size.width += theme.pagingOffset
       back.frame = backFrame
       back.appearance = NSApp.effectiveAppearance
+      if #available(macOS 26.0, *), let glass = back as? NSGlassEffectView {
+        glass.style = theme.glassStyle == .regular ? .regular : .clear
+        // Let the glass edge follow the panel's rounded corners (the shape mask clips the rest).
+        glass.cornerRadius = theme.cornerRadius
+      }
       back.isHidden = false
     } else {
       back.isHidden = true
