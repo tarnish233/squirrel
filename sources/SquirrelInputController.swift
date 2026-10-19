@@ -255,6 +255,9 @@ final class SquirrelInputController: IMKInputController {
   }
 
   override func menu() -> NSMenu! {
+    let settings = NSMenuItem(title: NSLocalizedString("Squirrel settings...", comment: "Menu item"), action: #selector(openSettings), keyEquivalent: ",")
+    settings.target = self
+    settings.keyEquivalentModifierMask = [.control, .option]
     let deploy = NSMenuItem(title: NSLocalizedString("Deploy", comment: "Menu item"), action: #selector(deploy), keyEquivalent: "`")
     deploy.target = self
     deploy.keyEquivalentModifierMask = [.control, .option]
@@ -270,6 +273,7 @@ final class SquirrelInputController: IMKInputController {
     update.target = self
 
     let menu = NSMenu()
+    menu.addItem(settings)
     menu.addItem(deploy)
     menu.addItem(sync)
     menu.addItem(logDir)
@@ -290,6 +294,10 @@ final class SquirrelInputController: IMKInputController {
 
   @objc func openLogFolder() {
     NSApp.squirrelAppDelegate.openLogFolder()
+  }
+
+  @objc func openSettings() {
+    NSApp.squirrelAppDelegate.openSettings()
   }
 
   @objc func openRimeFolder() {

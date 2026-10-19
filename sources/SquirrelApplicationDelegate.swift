@@ -19,6 +19,9 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
   var config: SquirrelConfig?
   var panel: SquirrelPanel?
   var enableNotifications = false
+  /// Set while a deploy asked for by the settings app runs: it saves after every change, so no
+  /// start or success notifications; it hears the outcome from SquirrelDeployDidFinishNotification.
+  var quietDeploy = false
   var showStatusIcon: Bool = true
   var statusItem: NSStatusItem?
   // ohmyrime fork: never start Sparkle, so the official appcast cannot replace this build.
@@ -82,9 +85,29 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
   func deploy() {
     print("Start maintenance...")
     self.shutdownRime()
-    self.startRime(fullCheck: true)
+    let started = self.startRime(fullCheck: true)
     self.loadSettings()
+    if !started {
+      // Nothing changed, so no maintenance and no deploy messages.
+      deployFinished("unchanged")
+    }
   }
+
+  /// Tells the settings app how a deploy ended: success, failure or unchanged.
+  func deployFinished(_ outcome: String) {
+    quietDeploy = false
+    DistributedNotificationCenter.default().postNotificationName(.init("SquirrelDeployDidFinishNotification"), object: outcome, userInfo: nil, deliverImmediately: true)
+  }
+
+  /// The settings app (鼠须管设置), or the user folder if it is not installed.
+  func openSettings() {
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.settingsAppIdentifier) {
+      NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    } else {
+      openRimeFolder()
+    }
+  }
+  static let settingsAppIdentifier = "im.rime.ohmyrime.settings"
 
   func syncUserData() {
     print("Sync user data")
@@ -159,12 +182,16 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
     rimeAPI.setup(&squirrelTraits)
   }
 
-  func startRime(fullCheck: Bool) {
+  /// Whether maintenance (a deploy) started.
+  @discardableResult
+  func startRime(fullCheck: Bool) -> Bool {
     print("Initializing la rime...")
     rimeAPI.initialize(nil)
     if rimeAPI.start_maintenance(fullCheck) {
       _ = rimeAPI.deploy_config_file("squirrel.yaml", "config_version")
+      return true
     }
+    return false
   }
 
   func loadSettings() {
@@ -276,11 +303,17 @@ private func notificationHandler(contextObject: UnsafeMutableRawPointer?, sessio
   if messageType == "deploy" {
     switch messageValue {
     case "start":
-      SquirrelApplicationDelegate.showMessage(msgText: NSLocalizedString("deploy_start", comment: ""))
+      if !delegate.quietDeploy {
+        SquirrelApplicationDelegate.showMessage(msgText: NSLocalizedString("deploy_start", comment: ""))
+      }
     case "success":
-      SquirrelApplicationDelegate.showMessage(msgText: NSLocalizedString("deploy_success", comment: ""))
+      if !delegate.quietDeploy {
+        SquirrelApplicationDelegate.showMessage(msgText: NSLocalizedString("deploy_success", comment: ""))
+      }
+      delegate.deployFinished("success")
     case "failure":
       SquirrelApplicationDelegate.showMessage(msgText: NSLocalizedString("deploy_failure", comment: ""))
+      delegate.deployFinished("failure")
     default:
       break
     }
@@ -412,8 +445,9 @@ private extension SquirrelApplicationDelegate {
     self.shutdownRime()
   }
 
-  func rimeNeedsReload(_: Notification) {
+  func rimeNeedsReload(_ notification: Notification) {
     print("Reloading rime on demand.")
+    quietDeploy = (notification.object as? String) == "quiet"
     self.deploy()
   }
 

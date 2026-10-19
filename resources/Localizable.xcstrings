@@ -208,6 +208,23 @@
         }
       }
     },
+    "Squirrel settings..." : {
+      "comment" : "Menu item",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设置..."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定..."
+          }
+        }
+      }
+    },
     "Sync user data" : {
       "comment" : "Menu item",
       "localizations" : {

@@ -21,6 +21,18 @@ final class SquirrelConfig {
     return isOpen
   }
 
+  /// A config parsed from YAML text rather than a deployed file, such as the settings app's preview.
+  func open(yaml: String) -> Bool {
+    close()
+    cache.removeAll()
+    isOpen = rimeAPI.config_load_string(&config, yaml)
+    if !isOpen {
+      _ = rimeAPI.config_close(&config)
+      config = .init()
+    }
+    return isOpen
+  }
+
   func open(schemaID: String, baseConfig: SquirrelConfig?) -> Bool {
     close()
     isOpen = rimeAPI.schema_open(schemaID, &config)
