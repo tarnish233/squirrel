@@ -102,7 +102,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 	<key>SUFeedURL</key>
 	<string>https://rime.github.io/release/squirrel/appcast.xml</string>
 	<key>SUPublicEDKey</key>
