@@ -33,6 +33,8 @@ final class SquirrelView: NSView {
   var canPageDown: Bool = false
   var highlightedPreeditRange: NSRange = .empty
   var separatorWidth: CGFloat = 0
+  /// Column widths of an expanded scroll-mode grid; empty otherwise.
+  var gridColumnWidths: [CGFloat] = []
   var shape = CAShapeLayer()
   private var downPath: CGPath?
   private var upPath: CGPath?
@@ -115,6 +117,74 @@ final class SquirrelView: NSView {
     return NSRect(x: x0, y: y0, width: x1-x0, height: y1-y0)
   }
 
+  /// Whether all the text fits on one line.
+  var isSingleLine: Bool {
+    var lines = 0
+    textLayoutManager.enumerateTextLayoutFragments(from: textLayoutManager.documentRange.location, options: []) { fragment in
+      lines += fragment.textLineFragments.count
+      return lines < 2
+    }
+    return lines < 2
+  }
+
+  /// Corner radius of the liquid glass outline: a capsule around one line, `corner_radius` around more.
+  func liquidGlassRadius(height: CGFloat) -> CGFloat {
+    isSingleLine ? min(height / 2, SquirrelTheme.capsuleRadiusLimit) : currentTheme.cornerRadius
+  }
+
+  /// The liquid glass highlight: a capsule around the candidate (around its cell in an expanded
+  /// grid), centered on its line. Nil when the candidate wraps onto another line.
+  func highlightCapsule(for range: NSRange, at index: Int) -> NSRect? {
+    let theme = currentTheme
+    // The text lives in the content storage; NSTextView.string is empty here.
+    let string = (textContentStorage.attributedString?.string ?? "") as NSString
+    var length = range.length
+    // Without a comment, the candidate ends with the format's space before [comment].
+    while length > 0 && range.location + length <= string.length && string.character(at: range.location + length - 1) == 0x20 {
+      length -= 1
+    }
+    guard length > 0, let textRange = convert(range: NSRange(location: range.location, length: length)) else { return nil }
+    var rects = [NSRect]()
+    textLayoutManager.enumerateTextSegments(in: textRange, type: .standard, options: [.rangeNotRequired]) { _, rect, _, _ in
+      rects.append(rect)
+      return true
+    }
+    guard var frame = rects.first, rects.allSatisfy({ abs($0.minY - frame.minY) < 1 }) else { return nil }
+    for rect in rects {
+      frame = frame.union(rect)
+    }
+    if !gridColumnWidths.isEmpty {
+      // The cell, ending a little before the next column, as in WeType.
+      frame.size.width = max(frame.width, gridColumnWidths[index % gridColumnWidths.count] - SquirrelTheme.highlightMargin - 1)
+    }
+    let lineHeight = theme.font.ascender - theme.font.descender
+    let height = max(lineHeight, lineHeight + 2 * theme.edgeInset.height - 2 * SquirrelTheme.highlightMargin)
+    let midY = frame.minY + theme.edgeInset.height + lineHeight / 2
+    return NSRect(x: frame.minX + theme.edgeInset.width - SquirrelTheme.highlightPadding, y: midY - height / 2,
+                  width: frame.width + 2 * SquirrelTheme.highlightPadding, height: height)
+  }
+
+  /// The liquid glass highlight layer, as in the WeType glass theme: a capsule with a hairline
+  /// edge and a faint sheen at the top.
+  func capsuleLayer(frame: NSRect, color: NSColor) -> CALayer {
+    let layer = CALayer()
+    layer.frame = frame
+    layer.cornerRadius = frame.height / 2
+    layer.cornerCurve = .continuous
+    layer.masksToBounds = true
+    layer.backgroundColor = color.cgColor
+    layer.borderWidth = 0.5
+    layer.borderColor = NSColor(white: 1, alpha: 0.18).cgColor
+    let sheen = CAGradientLayer()
+    sheen.frame = layer.bounds
+    sheen.colors = [NSColor(white: 1, alpha: 0.12).cgColor, NSColor(white: 1, alpha: 0).cgColor]
+    // From the top down: this view is flipped.
+    sheen.startPoint = CGPoint(x: 0.5, y: 0)
+    sheen.endPoint = CGPoint(x: 0.5, y: 1)
+    layer.addSublayer(sheen)
+    return layer
+  }
+
   // swiftlint:disable:next function_parameter_count
   func drawView(candidateRanges: [NSRange], hilightedIndex: Int, preeditRange: NSRange, highlightedPreeditRange: NSRange, canPageUp: Bool, canPageDown: Bool) {
     self.candidateRanges = candidateRanges
@@ -133,7 +203,9 @@ final class SquirrelView: NSView {
     var candidatePaths: CGMutablePath?
     var highlightedPath: CGMutablePath?
     var highlightedPreeditPath: CGMutablePath?
+    var highlightCapsuleFrame: NSRect?
     let theme = currentTheme
+    let opaqueGlass = theme.liquidGlass && NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
 
     var containingRect = self.bounds
     containingRect.size.width -= theme.pagingOffset
@@ -160,7 +232,12 @@ final class SquirrelView: NSView {
       let candidate = candidateRanges[i]
       if i == hilightedIndex {
         if candidate.length > 0 && theme.highlightedBackColor != nil {
-          highlightedPath = drawPath(highlightedRange: candidate, backgroundRect: backgroundRect, preeditRect: preeditRect, containingRect: containingRect, extraExpansion: 0)?.mutableCopy()
+          if theme.liquidGlass, let capsule = highlightCapsule(for: candidate, at: i) {
+            highlightCapsuleFrame = capsule
+            highlightedPath = CGPath(roundedRect: capsule, cornerWidth: capsule.height / 2, cornerHeight: capsule.height / 2, transform: nil).mutableCopy()
+          } else {
+            highlightedPath = drawPath(highlightedRange: candidate, backgroundRect: backgroundRect, preeditRect: preeditRect, containingRect: containingRect, extraExpansion: 0)?.mutableCopy()
+          }
         }
       } else {
         if candidate.length > 0 && theme.candidateBackColor != nil {
@@ -210,7 +287,12 @@ final class SquirrelView: NSView {
     }
 
     NSBezierPath.defaultLineWidth = 0
-    backgroundPath = drawSmoothLines(rectVertex(of: backgroundRect), straightCorner: Set(), alpha: 0.3 * theme.cornerRadius, beta: 1.4 * theme.cornerRadius)
+    if theme.liquidGlass {
+      let radius = min(liquidGlassRadius(height: backgroundRect.height), backgroundRect.width / 2, backgroundRect.height / 2)
+      backgroundPath = CGPath(roundedRect: backgroundRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+    } else {
+      backgroundPath = drawSmoothLines(rectVertex(of: backgroundRect), straightCorner: Set(), alpha: 0.3 * theme.cornerRadius, beta: 1.4 * theme.cornerRadius)
+    }
 
     self.layer?.sublayers = nil
     let backPath = backgroundPath?.mutableCopy()
@@ -226,7 +308,8 @@ final class SquirrelView: NSView {
       }
     }
     let panelLayer = shapeFromPath(path: backPath)
-    panelLayer.fillColor = theme.backgroundColor.cgColor
+    // With reduced transparency the glass is hidden; draw an opaque background instead.
+    panelLayer.fillColor = (opaqueGlass ? SquirrelTheme.opaqueGlassBackground : theme.backgroundColor).cgColor
     let panelLayerMask = shapeFromPath(path: backgroundPath)
     panelLayer.mask = panelLayerMask
     self.layer?.addSublayer(panelLayer)
@@ -241,6 +324,13 @@ final class SquirrelView: NSView {
       let mask = shapeFromPath(path: maskPath)
       layer.mask = mask
       panelLayer.addSublayer(layer)
+    }
+    if opaqueGlass {
+      let borderLayer = shapeFromPath(path: backgroundPath)
+      borderLayer.lineWidth = 1  // half of it is inside the mask
+      borderLayer.strokeColor = SquirrelTheme.opaqueGlassBorder.cgColor
+      borderLayer.fillColor = nil
+      panelLayer.addSublayer(borderLayer)
     }
     if theme.borderLineWidth > 0, let color = theme.borderColor {
       let borderLayer = shapeFromPath(path: backgroundPath)
@@ -259,7 +349,9 @@ final class SquirrelView: NSView {
       layer.fillColor = color.cgColor
       panelLayer.addSublayer(layer)
     }
-    if let color = theme.highlightedBackColor, let path = highlightedPath {
+    if let color = theme.highlightedBackColor, let capsule = highlightCapsuleFrame {
+      panelLayer.addSublayer(capsuleLayer(frame: capsule, color: color))
+    } else if let color = theme.highlightedBackColor, let path = highlightedPath {
       let layer = shapeFromPath(path: path)
       layer.fillColor = color.cgColor
       if theme.shadowSize > 0 {

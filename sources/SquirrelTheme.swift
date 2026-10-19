@@ -16,6 +16,17 @@ final class SquirrelTheme {
   enum StatusMessageType: String {
     case long, short, mix
   }
+  /// Liquid glass look: a single line is outlined as a capsule up to this corner radius.
+  static let capsuleRadiusLimit: CGFloat = 20
+  /// Liquid glass look: gap between the highlight capsule and the panel edge.
+  static let highlightMargin: CGFloat = 3
+  /// Liquid glass look: horizontal padding of the highlighted text inside its capsule.
+  static let highlightPadding: CGFloat = 6.5
+
+  /// Liquid glass look with reduced transparency: an opaque background with a hairline border.
+  static let opaqueGlassBackground = color(light: .white, dark: NSColor(srgbRed: 35 / 255, green: 33 / 255, blue: 34 / 255, alpha: 1))
+  static let opaqueGlassBorder = color(light: NSColor(white: 0, alpha: 0.14), dark: NSColor(white: 1, alpha: 0.14))
+
   /// Glass material of the translucent background on macOS 26 and later.
   enum GlassStyle: String {
     /// Frosted; keeps text readable over busy content.
@@ -72,21 +83,30 @@ final class SquirrelTheme {
   private(set) var alpha: CGFloat = 1
 
   private(set) var translucency = false
-  private(set) var glassStyle = GlassStyle.clear
-  /// Opacity of the window background color laid over the glass by the native color scheme.
-  private(set) var glassOpacity: CGFloat = 0
+  private var glassStyleSetting: GlassStyle?
+  /// Regular for the liquid glass look, clear otherwise, unless `glass_style` says so.
+  var glassStyle: GlassStyle { glassStyleSetting ?? (liquidGlass ? .regular : .clear) }
+  /// The macOS 26 Liquid Glass look, for the native color scheme with translucency:
+  /// - the glass is the background, veiled in dark mode for contrast;
+  /// - the outline is a capsule around a single line and has `corner_radius` around more lines;
+  /// - `border_width` / `border_height` are the padding;
+  /// - the highlight is a system-blue capsule with white text.
+  private(set) var liquidGlass = false
   private(set) var mutualExclusive = false
   private(set) var linear = false
   private(set) var vertical = false
   private(set) var inlinePreedit = false
   private(set) var inlineCandidate = false
   private(set) var showPaging = false
+  /// Animate expanding and collapsing the scroll-mode grid (`style/motion`).
+  private(set) var motion = false
   private(set) var scrollSettings = SquirrelScrollSettings()
 
   private var fonts = [NSFont]()
   private var labelFonts = [NSFont]()
   private var commentFonts = [NSFont]()
   private var preeditFonts = [NSFont]()
+  private var hilitedFonts = [NSFont]()
   private var fontSize: CGFloat?
   private var labelFontSize: CGFloat?
   private var commentFontSize: CGFloat?
@@ -131,45 +151,68 @@ final class SquirrelTheme {
       return self.font
     }
   }()
+  /// Font of the highlighted candidate and its label (`hilited_font_face`), such as a heavier weight.
+  private(set) lazy var highlightedFont: NSFont = combineFonts(hilitedFonts, size: font.pointSize) ?? font
+  private(set) lazy var highlightedLabelFont: NSFont = combineFonts(hilitedFonts, size: labelFont.pointSize) ?? labelFont
+  /// Liquid glass look: labels take a fixed width, so candidates start at the same offset whatever
+  /// the digit (as in WeType); the widest digit and a small gap.
+  private(set) lazy var labelColumnWidth: CGFloat = {
+    let digits = (0...9).map(String.init)
+    let widest = [labelFont, highlightedLabelFont].flatMap { font in
+      digits.map { ($0 as NSString).size(withAttributes: [.font: font]).width }
+    }.max() ?? 0
+    return widest + labelFont.pointSize * 0.05
+  }()
+  /// The same baseline offset on a whole line moves nothing: TextKit lays the line out around it.
+  /// So the liquid glass look moves the text view by `base_offset` instead (see SquirrelPanel.show).
+  private var textBaselineOffset: CGFloat {
+    liquidGlass ? 0 : baseOffset
+  }
+  private var labelBaselineOffset: CGFloat {
+    textBaselineOffset + (!vertical ? (font.pointSize - labelFont.pointSize) / 2.5 : 0)
+  }
+  private var commentBaselineOffset: CGFloat {
+    textBaselineOffset + (!vertical ? (font.pointSize - commentFont.pointSize) / 2.5 : 0)
+  }
   private(set) lazy var attrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: candidateTextColor,
     .font: font,
-    .baselineOffset: baseOffset
+    .baselineOffset: textBaselineOffset
   ]
   private(set) lazy var highlightedAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: highlightedCandidateTextColor,
-    .font: font,
-    .baselineOffset: baseOffset
+    .font: highlightedFont,
+    .baselineOffset: textBaselineOffset
   ]
   private(set) lazy var labelAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: candidateLabelColor ?? blendColor(foregroundColor: self.candidateTextColor, backgroundColor: self.backgroundColor),
     .font: labelFont,
-    .baselineOffset: baseOffset + (!vertical ? (font.pointSize - labelFont.pointSize) / 2.5 : 0)
+    .baselineOffset: labelBaselineOffset
   ]
   private(set) lazy var labelHighlightedAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: highlightedCandidateLabelColor ?? blendColor(foregroundColor: highlightedCandidateTextColor, backgroundColor: highlightedBackColor),
-    .font: labelFont,
-    .baselineOffset: baseOffset + (!vertical ? (font.pointSize - labelFont.pointSize) / 2.5 : 0)
+    .font: highlightedLabelFont,
+    .baselineOffset: labelBaselineOffset
   ]
   private(set) lazy var commentAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: commentTextColor ?? candidateTextColor,
     .font: commentFont,
-    .baselineOffset: baseOffset + (!vertical ? (font.pointSize - commentFont.pointSize) / 2.5 : 0)
+    .baselineOffset: commentBaselineOffset
   ]
   private(set) lazy var commentHighlightedAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: highlightedCommentTextColor ?? highlightedCandidateTextColor,
     .font: commentFont,
-    .baselineOffset: baseOffset + (!vertical ? (font.pointSize - commentFont.pointSize) / 2.5 : 0)
+    .baselineOffset: commentBaselineOffset
   ]
   private(set) lazy var preeditAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: textColor,
     .font: preeditFont,
-    .baselineOffset: baseOffset
+    .baselineOffset: textBaselineOffset
   ]
   private(set) lazy var preeditHighlightedAttrs: [NSAttributedString.Key: Any] = [
     .foregroundColor: highlightedTextColor,
     .font: preeditFont,
-    .baselineOffset: baseOffset
+    .baselineOffset: textBaselineOffset
   ]
 
   private(set) lazy var firstParagraphStyle: NSParagraphStyle = {
@@ -190,11 +233,15 @@ final class SquirrelTheme {
     style.lineSpacing = linespace
     return style as NSParagraphStyle
   }()
-  private(set) lazy var edgeInset: NSSize = if self.vertical {
-    NSSize(width: borderHeight + cornerRadius, height: borderWidth + cornerRadius)
-  } else {
-    NSSize(width: borderWidth + cornerRadius, height: borderHeight + cornerRadius)
-  }
+  private(set) lazy var edgeInset: NSSize = {
+    // The liquid glass outline adapts to the content, so its padding is just the border.
+    let radius = liquidGlass ? 0 : cornerRadius
+    return if vertical {
+      NSSize(width: borderHeight + radius, height: borderWidth + radius)
+    } else {
+      NSSize(width: borderWidth + radius, height: borderHeight + radius)
+    }
+  }()
   private(set) lazy var borderLineWidth: CGFloat = min(borderHeight, borderWidth)
   private(set) var candidateFormat: String {
     get {
@@ -224,16 +271,17 @@ final class SquirrelTheme {
     inlinePreedit ?= config.getBool("style/inline_preedit")
     inlineCandidate ?= config.getBool("style/inline_candidate")
     translucency ?= config.getBool("style/translucency")
-    glassStyle ?= config.getString("style/glass_style").flatMap(GlassStyle.init(rawValue:))
-    glassOpacity ?= config.getDouble("style/glass_opacity").map { min(1, max(0, $0)) }
+    glassStyleSetting ?= config.getString("style/glass_style").flatMap(GlassStyle.init(rawValue:))
     mutualExclusive ?= config.getBool("style/mutual_exclusive")
     memorizeSize ?= config.getBool("style/memorize_size")
     showPaging ?= config.getBool("style/show_paging")
+    motion ?= config.getBool("style/motion")
     scrollSettings.enabled ?= config.getBool("style/scroll_mode/enable")
     scrollSettings.maxRows ?= config.getDouble("style/scroll_mode/max_rows").map {
       min(max(Int($0), SquirrelScrollSettings.rowLimit.lowerBound), SquirrelScrollSettings.rowLimit.upperBound)
     }
     scrollSettings.tabPaging ?= config.getBool("style/scroll_mode/tab_paging")
+    scrollSettings.columnWidth ?= config.getDouble("style/scroll_mode/column_width").map { max(0, $0) }
 
     statusMessageType ?= .init(rawValue: config.getString("style/status_message_type") ?? "")
     candidateFormat ?= config.getString("style/candidate_format")
@@ -258,6 +306,7 @@ final class SquirrelTheme {
     var commentFontSize = config.getDouble("style/comment_font_point")
     var preeditFontName = config.getString("style/preedit_font_face")
     var preeditFontSize = config.getDouble("style/preedit_font_point")
+    var hilitedFontName = config.getString("style/hilited_font_face")
 
     let colorSchemeOption = dark ? "style/color_scheme_dark" : "style/color_scheme"
     if let colorScheme = config.getString(colorSchemeOption) {
@@ -289,10 +338,10 @@ final class SquirrelTheme {
         inlinePreedit ?= config.getBool("\(prefix)/inline_preedit")
         inlineCandidate ?= config.getBool("\(prefix)/inline_candidate")
         translucency ?= config.getBool("\(prefix)/translucency")
-        glassStyle ?= config.getString("\(prefix)/glass_style").flatMap(GlassStyle.init(rawValue:))
-        glassOpacity ?= config.getDouble("\(prefix)/glass_opacity").map { min(1, max(0, $0)) }
+        glassStyleSetting ?= config.getString("\(prefix)/glass_style").flatMap(GlassStyle.init(rawValue:))
         mutualExclusive ?= config.getBool("\(prefix)/mutual_exclusive")
         showPaging ?= config.getBool("\(prefix)/show_paging")
+        motion ?= config.getBool("\(prefix)/motion")
         candidateFormat ?= config.getString("\(prefix)/candidate_format")
         fontName ?= config.getString("\(prefix)/font_face")
         fontSize ?= config.getDouble("\(prefix)/font_point")
@@ -302,6 +351,7 @@ final class SquirrelTheme {
         commentFontSize ?= config.getDouble("\(prefix)/comment_font_point")
         preeditFontName ?= config.getString("\(prefix)/preedit_font_face")
         preeditFontSize ?= config.getDouble("\(prefix)/preedit_font_point")
+        hilitedFontName ?= config.getString("\(prefix)/hilited_font_face")
 
         alpha ?= config.getDouble("\(prefix)/alpha").map { max(0, min(1, $0)) }
         cornerRadius ?= config.getDouble("\(prefix)/corner_radius")
@@ -318,14 +368,17 @@ final class SquirrelTheme {
     } else {
       available = false
     }
-    if native && translucency {
-      // Let the glass (or blur) show through, optionally frosted with the window background color,
-      // and select like menus do: accent color, white text.
-      backgroundColor = glassOpacity > 0 ? Self.windowBackgroundColor(alpha: glassOpacity) : .clear
-      highlightedBackColor = .controlAccentColor
-      highlightedCandidateTextColor = .alternateSelectedControlTextColor
-      highlightedCandidateLabelColor = .alternateSelectedControlTextColor.withAlphaComponent(0.75)
-      highlightedCommentTextColor = .alternateSelectedControlTextColor.withAlphaComponent(0.75)
+    liquidGlass = native && translucency
+    if liquidGlass {
+      // Colors of the WeType glass theme; the glass itself is the background.
+      backgroundColor = .clear
+      highlightedBackColor = .systemBlue
+      candidateTextColor = Self.color(light: NSColor(white: 40 / 255, alpha: 1), dark: NSColor(white: 232 / 255, alpha: 1))
+      candidateLabelColor = Self.color(light: NSColor(white: 130 / 255, alpha: 1), dark: NSColor(white: 180 / 255, alpha: 1))
+      commentTextColor = candidateLabelColor
+      highlightedCandidateTextColor = .white
+      highlightedCandidateLabelColor = .white
+      highlightedCommentTextColor = NSColor(white: 1, alpha: 0.8)
     }
 
     fonts = decodeFonts(from: fontName)
@@ -336,6 +389,7 @@ final class SquirrelTheme {
     self.commentFontSize = commentFontSize
     preeditFonts = decodeFonts(from: preeditFontName ?? fontName)
     self.preeditFontSize = preeditFontSize
+    hilitedFonts = decodeFonts(from: hilitedFontName)
   }
 }
 
@@ -354,15 +408,10 @@ private extension SquirrelTheme {
     return NSFont.init(descriptor: fontDescriptor, size: size ?? fonts[0].pointSize)
   }
 
-  /// The window background color at an opacity, resolved for the appearance it is drawn in;
-  /// `withAlphaComponent` would fix it to the appearance current when the theme loads.
-  static func windowBackgroundColor(alpha: CGFloat) -> NSColor {
+  /// A color that differs between the light and the dark appearance.
+  static func color(light: NSColor, dark: NSColor) -> NSColor {
     NSColor(name: nil) { appearance in
-      var color = NSColor.windowBackgroundColor
-      appearance.performAsCurrentDrawingAppearance {
-        color = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? color
-      }
-      return color.withAlphaComponent(alpha)
+      appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
     }
   }
 

@@ -24,6 +24,9 @@ struct SquirrelScrollSettings {
   /// Like WeType's "Tab / Shift+Tab to turn pages": while candidates are shown,
   /// Tab moves to the next row (expanding the grid) and Shift+Tab to the previous one.
   var tabPaging = true
+  /// Minimum width of a grid column in points, so that short candidates line up in even cells;
+  /// longer ones still widen their column.
+  var columnWidth: CGFloat = 0
 
   static let rowLimit = 2...20
 }

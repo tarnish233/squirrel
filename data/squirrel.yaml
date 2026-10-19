@@ -41,14 +41,16 @@ style:
   # Whether transparent colors stack on each other
   mutual_exclusive: false
   # Whether to use a translucent background: the glass material on macOS 26+, a blur before.
-  # With the native color scheme the background turns transparent and the highlight takes the
-  # accent color; other color schemes need a transparent back_color for it to show.
+  # With the native color scheme this is the Liquid Glass look: a capsule around one line,
+  # corner_radius around more, border_width / border_height as the padding, a system-blue
+  # capsule highlight with white text, and a veil over the glass in dark mode.
+  # Other color schemes need a transparent back_color for it to show.
   translucency: false
-  # Glass material on macOS 26+: clear (more see-through) | regular (frosted, easier to read)
+  # Glass material on macOS 26+: regular (frosted, easier to read; the Liquid Glass look's
+  # default) | clear (more see-through; the default otherwise)
   #glass_style: clear
-  # Native color scheme with translucency: opacity (0-1) of the window background color laid
-  # over the glass, to keep text readable over busy content
-  #glass_opacity: 0
+  # Animate expanding and collapsing the scroll-mode grid (follows "Reduce motion")
+  #motion: false
   # Enable to show small arrows that indicates if paging up/down is possible
   show_paging: false
   # Scroll mode (卷轴模式), for candidate_list_layout: linear with text_orientation: horizontal.
@@ -62,6 +64,8 @@ style:
     # Tab / Shift+Tab turn pages (rows) while candidates are shown, like WeType;
     # Shift+Tab on the first row collapses the grid
     tab_paging: true
+    # Minimum width of a grid column in points, so short candidates line up in even cells
+    #column_width: 0
 
   corner_radius: 7
   hilited_corner_radius: 0
@@ -84,7 +88,7 @@ style:
   # and %c is replaced by "[label]"
   candidate_format: '[label]. [candidate] [comment]'
 
-  # adjust the base line of text
+  # adjust the base line of text (the Liquid Glass look moves the text inside the panel instead)
   #base_offset: 0
   # Comma-separated fonts, the first one preferred; 'system' is the system font (SF, with the
   # system CJK font), 'system-medium' etc. pick a weight, e.g. 'system, PingFang SC'
@@ -96,6 +100,8 @@ style:
   #comment_font_point: 16
   #preedit_font_face: 'Avenir'
   #preedit_font_point: 16
+  # Font of the highlighted candidate and its label, such as a heavier weight
+  #hilited_font_face: 'PingFangSC-Medium'
 
 preset_color_schemes:
   native:

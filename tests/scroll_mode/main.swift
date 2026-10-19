@@ -243,8 +243,8 @@ func runPreview() {
   }
   caretRect = NSRect(x: backdropFrame.minX + 330, y: backdropFrame.maxY - 92, width: 1, height: 18)
 
-  func capture(_ name: String) {
-    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+  func capture(_ name: String, settle: Double = 0.5) {
+    RunLoop.main.run(until: Date().addingTimeInterval(settle))
     let caretLine = NSRect(x: caretRect.minX - 60, y: caretRect.minY, width: 60, height: caretRect.height)
     let region = panel.frame.union(caretLine).insetBy(dx: -28, dy: -24).intersection(backdropFrame).integral
     guard onlyOwnWindows(in: region) else {
@@ -260,7 +260,30 @@ func runPreview() {
     task.arguments = ["-x", "-R\(Int(region.minX)),\(Int(screenHeight - region.maxY)),\(Int(region.width)),\(Int(region.height))", url.path]
     try? task.run()
     task.waitUntilExit()
-    print("  → \(url.lastPathComponent) panel \(Int(panel.frame.width))×\(Int(panel.frame.height))")
+    // Where the panel is in the screenshot (points from the top left), for tests/scroll_mode/measure.py.
+    print(String(format: "  → %@ panel %.0f×%.0f at %.0f,%.0f", url.lastPathComponent, panel.frame.width, panel.frame.height,
+                 panel.frame.minX - region.minX, region.maxY - panel.frame.maxY))
+    if let view: SquirrelView = field(panel, "view") {
+      // Layout metrics for tuning paddings: line fragments in text container coordinates.
+      var lines = [String]()
+      view.textLayoutManager.enumerateTextLayoutFragments(from: view.textLayoutManager.documentRange.location, options: []) { fragment in
+        let frame = fragment.layoutFragmentFrame
+        for line in fragment.textLineFragments {
+          let bounds = line.typographicBounds
+          lines.append(String(format: "y %.1f+%.1f h %.1f", frame.minY, bounds.minY, bounds.height))
+        }
+        return true
+      }
+      let ranges = view.candidateRanges, index = view.hilightedIndex
+      if index >= 0 && index < ranges.count {
+        let text = ((view.textContentStorage.attributedString?.string ?? "") as NSString).substring(with: ranges[index])
+        let capsule = view.highlightCapsule(for: ranges[index], at: index) ?? .zero
+        print(String(format: "    highlight %@ scalars %@ capsule x %.1f w %.1f", text.debugDescription,
+                     text.unicodeScalars.map { String(format: "%04X", $0.value) }.joined(separator: " "), capsule.minX, capsule.width))
+      }
+      print(String(format: "    content %.1f×%.1f inset %.1f,%.1f lines: ", view.contentRect.width, view.contentRect.height,
+                   view.textView.textContainerInset.width, view.textView.textContainerInset.height) + lines.prefix(3).joined(separator: " | "))
+    }
   }
 
   for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
@@ -281,6 +304,50 @@ func runPreview() {
     capture("\(name)-3-comments")
     press(escape)
   }
+  // Motion: sample the window size while the grid expands and collapses.
+  func sample(_ name: String, _ action: () -> Void) {
+    var sizes = [String]()
+    let start = CACurrentMediaTime()
+    action()
+    while CACurrentMediaTime() - start < 0.32 {
+      RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+      sizes.append(String(format: "%.0f:%.0f×%.0f", (CACurrentMediaTime() - start) * 1000, panel.frame.width, panel.frame.height))
+    }
+    print("  \(name): " + sizes.joined(separator: " "))
+  }
+  print("== motion")
+  NSApp.appearance = NSAppearance(named: .aqua)
+  backdrop.appearance = NSApp.appearance
+  backdrop.contentView?.needsDisplay = true
+  type("shi")
+  RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+  sample("expand (Tab)") { press(tab) }
+  press(shiftTab)  // back to the first row
+  RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+  sample("collapse (⇧Tab on the first row)") { press(shiftTab) }
+  sample("expand again (↓)") { press(down) }
+  press(up)  // back to the first row
+  RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+  sample("reverse mid-way (↑ collapses, ↓ after 60 ms)") {
+    press(up)  // first row: collapse…
+    RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+    press(down)  // …and expand again before it ends
+  }
+  press(escape)
+  // Mid-way frames, slowed down 20 times.
+  SquirrelPanel.motionTimeScale = 20
+  type("shi")
+  RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+  press(tab)
+  capture("light-4-expanding", settle: 0.12)
+  RunLoop.main.run(until: Date().addingTimeInterval(4.2))
+  press(shiftTab)
+  press(shiftTab)
+  capture("light-5-collapsing", settle: 0.25)
+  RunLoop.main.run(until: Date().addingTimeInterval(3.4))
+  SquirrelPanel.motionTimeScale = 1
+  press(escape)
+
   panel.hide()
   backdrop.orderOut(nil)
   rimeAPI.finalize()

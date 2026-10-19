@@ -38,6 +38,12 @@ final class SquirrelPanel: NSPanel {
   private var scrollGeneration: Int?
   private var minimumTextWidth: CGFloat = 0
   private var minimumContentWidth: CGFloat = 0
+  // Motion: whether the shown panel is an expanded grid, and the running frame transition.
+  private var shownExpanded = false
+  private var frameMotion: FrameMotion?
+  private var liquidGlassRadius: CGFloat = 0
+  /// Slows frame transitions down, for tests.
+  static var motionTimeScale = 1.0
 
   init(position: NSRect) {
     self.position = position
@@ -160,6 +166,8 @@ final class SquirrelPanel: NSPanel {
   func hide() {
     statusTimer?.invalidate()
     statusTimer = nil
+    stopFrameMotion()
+    shownExpanded = false
     orderOut(nil)
     maxHeight = 0
   }
@@ -276,6 +284,17 @@ final class SquirrelPanel: NSPanel {
       let labeledLine = line.copy() as! NSAttributedString
       line.mutableString.replaceOccurrences(of: "[candidate]", with: candidate, range: NSRange(location: 0, length: line.length))
       line.mutableString.replaceOccurrences(of: "[comment]", with: comment, range: NSRange(location: 0, length: line.length))
+      preferColorEmoji(in: line)
+      if theme.liquidGlass && !vertical, let labelEnd = labeledLine.string.firstMatch(of: /\[(candidate|comment)\]/)?.range.lowerBound {
+        // Labels take a fixed width, so that every candidate starts at the same offset.
+        let labelLength = labelEnd.utf16Offset(in: labeledLine.string)
+        if labelLength > 0 {
+          let width = line.attributedSubstring(from: NSRange(location: 0, length: labelLength)).size().width
+          if width < theme.labelColumnWidth {
+            line.addAttribute(.kern, value: theme.labelColumnWidth - width, range: NSRange(location: labelLength - 1, length: 1))
+          }
+        }
+      }
 
       if line.length <= 10 {
         line.addAttribute(.noBreak, value: true, range: NSRange(location: 1, length: line.length-1))
@@ -307,6 +326,12 @@ final class SquirrelPanel: NSPanel {
         paragraphStyleCandidate.paragraphSpacingBefore -= theme.linespace
         paragraphStyleCandidate.lineSpacing = theme.linespace
       }
+      if theme.liquidGlass {
+        // Even rows: emoji and fallback fonts must not make their line taller.
+        let lineHeight = theme.font.ascender - theme.font.descender + theme.font.leading
+        paragraphStyleCandidate.minimumLineHeight = lineHeight
+        paragraphStyleCandidate.maximumLineHeight = lineHeight
+      }
       if !linear, let labelEnd = labeledLine.string.firstMatch(of: /\[(candidate|comment)\]/)?.range.lowerBound {
         let labelString = labeledLine.attributedSubstring(from: NSRange(location: 0, length: labelEnd.utf16Offset(in: labeledLine.string)))
         let labelWidth = labelString.boundingRect(with: .zero, options: [.usesLineFragmentOrigin]).width
@@ -327,6 +352,7 @@ final class SquirrelPanel: NSPanel {
     } else {
       minimumTextWidth = 0
       minimumContentWidth = 0
+      view.gridColumnWidths = []
     }
 
     // Force TextKit 2 layout before measuring wrapped text and highlight bounds.
@@ -531,43 +557,85 @@ private extension SquirrelPanel {
       if panelRect.minY < screenRect.minY { panelRect.origin.y = screenRect.minY }
     }
 
-    self.setFrame(panelRect, display: true)
-
-    // Keep the window frame at the scaled physical size while drawing in natural coordinates through bounds.
-    contentView!.frame = NSRect(origin: .zero, size: panelRect.size)
-    contentView!.bounds = NSRect(origin: .zero, size: naturalPanelSize)
-
-    if vertical {
-      contentView!.boundsRotation = -90
-      contentView!.setBoundsOrigin(NSPoint(x: 0, y: naturalPanelSize.width))
+    // Motion: expanding or collapsing the grid moves the window frame like a drawer, as in WeType.
+    let expanded = scrollLayout != nil
+    let transition = expanded != shownExpanded
+    shownExpanded = expanded
+    let canAnimate = theme.motion && !vertical && !requiresFullScreen && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    if canAnimate && transition && isVisible {
+      startFrameMotion(to: panelRect, expanding: expanded)
+    } else if canAnimate, let motion = frameMotion {
+      // A new layout during the transition: keep moving, towards it.
+      motion.target = panelRect
     } else {
+      stopFrameMotion()
+      self.setFrame(panelRect, display: true)
+    }
+    let animating = frameMotion != nil
+
+    if animating {
+      // The window is in between: draw at the final size, pinned to its top, and let the window clip.
+      contentView!.bounds = NSRect(origin: .zero, size: contentView!.frame.size)
       contentView!.boundsRotation = 0
       contentView!.setBoundsOrigin(.zero)
+    } else {
+      // Keep the window frame at the scaled physical size while drawing in natural coordinates through bounds.
+      contentView!.frame = NSRect(origin: .zero, size: panelRect.size)
+      contentView!.bounds = NSRect(origin: .zero, size: naturalPanelSize)
+
+      if vertical {
+        contentView!.boundsRotation = -90
+        contentView!.setBoundsOrigin(NSPoint(x: 0, y: naturalPanelSize.width))
+      } else {
+        contentView!.boundsRotation = 0
+        contentView!.setBoundsOrigin(.zero)
+      }
     }
 
     view.textView.boundsRotation = 0
     view.textView.setBoundsOrigin(.zero)
 
     // Subviews must read the post-rotation bounds; Cocoa adjusts the origin and swaps dimensions in vertical mode.
-    let subviewFrame = contentView!.bounds
+    let subviewFrame = if animating {
+      NSRect(x: 0, y: contentView!.bounds.height - naturalPanelSize.height, width: naturalPanelSize.width, height: naturalPanelSize.height)
+    } else {
+      contentView!.bounds
+    }
     view.frame = subviewFrame
 
     var textFrame = subviewFrame
     textFrame.size.width -= theme.pagingOffset
     textFrame.origin.x += theme.pagingOffset
+    if theme.liquidGlass && !vertical {
+      // Optical alignment: the highlight stays centered on the line, the glyphs move.
+      textFrame.origin.y += theme.baseOffset
+    }
     view.textView.frame = textFrame
+    // While the window frame moves, the content stays at the top and the background follows.
+    view.autoresizingMask = animating ? [.minYMargin] : []
+    view.textView.autoresizingMask = animating ? [.minYMargin] : []
+    back.autoresizingMask = animating ? [.width, .height] : []
 
     if theme.translucency {
-      var backFrame = subviewFrame
-      backFrame.size.width += theme.pagingOffset
+      var backFrame = animating ? contentView!.bounds : subviewFrame
+      backFrame.size.width += animating ? 0 : theme.pagingOffset
       back.frame = backFrame
       back.appearance = NSApp.effectiveAppearance
-      if #available(macOS 26.0, *), let glass = back as? NSGlassEffectView {
-        glass.style = theme.glassStyle == .regular ? .regular : .clear
-        // Let the glass edge follow the panel's rounded corners (the shape mask clips the rest).
-        glass.cornerRadius = theme.cornerRadius
+      if theme.liquidGlass {
+        liquidGlassRadius = view.liquidGlassRadius(height: naturalPanelSize.height)
+        configureLiquidGlass(radius: min(liquidGlassRadius, backFrame.height / 2))
+        // With reduced transparency the view draws an opaque background instead.
+        back.isHidden = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+      } else {
+        back.layer?.mask = view.shape
+        if #available(macOS 26.0, *), let glass = back as? NSGlassEffectView {
+          glass.style = theme.glassStyle == .regular ? .regular : .clear
+          // Let the glass edge follow the panel's rounded corners (the shape mask clips the rest).
+          glass.cornerRadius = theme.cornerRadius
+          glass.contentView = nil
+        }
+        back.isHidden = false
       }
-      back.isHidden = false
     } else {
       back.isHidden = true
     }
@@ -581,6 +649,8 @@ private extension SquirrelPanel {
   func show(status message: String) {
     minimumTextWidth = 0
     minimumContentWidth = 0
+    scrollLayout = nil
+    view.gridColumnWidths = []
     let theme = view.currentTheme
     let text = NSMutableAttributedString(string: message, attributes: theme.attrs)
     text.addAttribute(.paragraphStyle, value: theme.paragraphStyle, range: NSRange(location: 0, length: text.length))
@@ -610,8 +680,9 @@ private extension SquirrelPanel {
     for (i, range) in candidateRanges.enumerated() {
       guard let textRange = view.convert(range: range) else { continue }
       let column = i % scroll.rowSize
-      scrollColumnWidths[column] = max(scrollColumnWidths[column], ceil(view.contentRect(range: textRange).width))
+      scrollColumnWidths[column] = max(scrollColumnWidths[column], ceil(view.contentRect(range: textRange).width), scrollSettings.columnWidth)
     }
+    view.gridColumnWidths = scrollColumnWidths
 
     let gap = view.separatorWidth
     var tabStops = [NSTextTab]()
@@ -638,6 +709,129 @@ private extension SquirrelPanel {
     let startPos = range.lowerBound.utf16Offset(in: string)
     let endPos = range.upperBound.utf16Offset(in: string)
     return NSRange(location: startPos, length: endPos - startPos)
+  }
+
+  /// A window frame transition: expanding takes 0.20 s, collapsing 0.16 s, with WeType's curves.
+  final class FrameMotion {
+    let start: NSRect
+    var target: NSRect
+    let startTime = CACurrentMediaTime()
+    let duration: Double
+    let curve: (Double, Double, Double, Double)
+    var timer: Timer?
+
+    init(from start: NSRect, to target: NSRect, expanding: Bool) {
+      self.start = start
+      self.target = target
+      duration = (expanding ? 0.20 : 0.16) * SquirrelPanel.motionTimeScale
+      curve = expanding ? (0.18, 0.82, 0.24, 1) : (0.25, 0.10, 0.25, 1)
+    }
+
+    /// The frame at a time, on the cubic Bézier timing curve.
+    func frame(at time: CFTimeInterval) -> (NSRect, done: Bool) {
+      let elapsed = min(1, max(0, (time - startTime) / duration))
+      let progress = CGFloat(Self.bezier(elapsed, curve))
+      func mix(_ from: CGFloat, _ to: CGFloat) -> CGFloat { from + (to - from) * progress }
+      let frame = NSRect(x: mix(start.minX, target.minX), y: mix(start.minY, target.minY),
+                         width: mix(start.width, target.width), height: mix(start.height, target.height))
+      return (elapsed >= 1 ? target : frame, elapsed >= 1)
+    }
+
+    /// y of the timing curve through (0, 0), (x1, y1), (x2, y2), (1, 1) at x.
+    static func bezier(_ x: Double, _ curve: (Double, Double, Double, Double)) -> Double {
+      func sample(_ t: Double, _ p1: Double, _ p2: Double) -> Double {
+        3 * (1 - t) * (1 - t) * t * p1 + 3 * (1 - t) * t * t * p2 + t * t * t
+      }
+      var low = 0.0, high = 1.0, t = x
+      for _ in 0..<24 {
+        if sample(t, curve.0, curve.2) < x { low = t } else { high = t }
+        t = (low + high) / 2
+      }
+      return sample(t, curve.1, curve.3)
+    }
+  }
+
+  func startFrameMotion(to target: NSRect, expanding: Bool) {
+    stopFrameMotion()
+    let motion = FrameMotion(from: frame, to: target, expanding: expanding)
+    frameMotion = motion
+    let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+      self?.stepFrameMotion()
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    motion.timer = timer
+    // The text fades in (and drops into place when expanding), as WeType's candidates do.
+    let fade = CABasicAnimation(keyPath: "opacity")
+    fade.fromValue = 0.3
+    fade.toValue = 1
+    let slide = CABasicAnimation(keyPath: "transform.translation.y")
+    slide.fromValue = expanding ? 4 : 0
+    slide.toValue = 0
+    let reveal = CAAnimationGroup()
+    reveal.animations = [fade, slide]
+    reveal.duration = expanding ? 0.16 : 0.10
+    reveal.timingFunction = CAMediaTimingFunction(name: .easeOut)
+    view.textView.layer?.add(reveal, forKey: "reveal")
+  }
+
+  func stepFrameMotion() {
+    guard let motion = frameMotion else { return }
+    let (frame, done) = motion.frame(at: CACurrentMediaTime())
+    setFrame(frame, display: true)
+    if view.currentTheme.liquidGlass {
+      configureLiquidGlass(radius: min(liquidGlassRadius, frame.height / 2))
+    }
+    invalidateShadow()
+    if done {
+      stopFrameMotion()
+    }
+  }
+
+  func stopFrameMotion() {
+    frameMotion?.timer?.invalidate()
+    frameMotion = nil
+  }
+
+  /// The liquid glass background, as in the WeType glass theme: the glass is shaped by its own
+  /// corner radius (a mask would clip its edge highlights) and veiled in dark mode so that white
+  /// text stays readable over bright content.
+  func configureLiquidGlass(radius: CGFloat) {
+    back.layer?.mask = nil
+    guard #available(macOS 26.0, *), let glass = back as? NSGlassEffectView else {
+      // Blur before macOS 26.
+      back.layer?.cornerRadius = radius
+      back.layer?.cornerCurve = .continuous
+      back.layer?.masksToBounds = true
+      return
+    }
+    glass.style = view.currentTheme.glassStyle == .regular ? .regular : .clear
+    glass.cornerRadius = radius
+    if #available(macOS 27.0, *) {
+      glass.effectIsInteractive = false
+    }
+    let veil = glass.contentView ?? NSView()
+    veil.wantsLayer = true
+    veil.layer?.cornerRadius = radius
+    veil.layer?.cornerCurve = .continuous
+    veil.layer?.masksToBounds = true
+    veil.layer?.backgroundColor = (view.isDark ? NSColor(white: 0, alpha: 0.5) : NSColor.clear).cgColor
+    if glass.contentView !== veil {
+      glass.contentView = veil
+    }
+  }
+
+  /// PingFang has monochrome glyphs for some emoji (such as 🉑 and 🉐): draw every emoji cluster
+  /// with the color emoji font, keeping explicit text presentation (U+FE0E).
+  func preferColorEmoji(in text: NSMutableAttributedString) {
+    let string = text.string as NSString
+    string.enumerateSubstrings(in: NSRange(location: 0, length: string.length), options: .byComposedCharacterSequences) { cluster, range, _, _ in
+      guard let scalars = cluster?.unicodeScalars, !scalars.contains("\u{FE0E}") else { return }
+      let isColor = scalars.contains { $0.properties.isEmojiPresentation } ||
+        ((scalars.contains("\u{FE0F}") || scalars.contains("\u{20E3}")) && scalars.contains { $0.properties.isEmoji })
+      guard isColor, let font = text.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
+            let emojiFont = NSFont(name: "AppleColorEmoji", size: font.pointSize) else { return }
+      text.addAttribute(.font, value: emojiFont, range: range)
+    }
   }
 
   static func makeBackgroundView() -> NSView {
