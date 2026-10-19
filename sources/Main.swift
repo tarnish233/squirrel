@@ -15,9 +15,9 @@ struct SquirrelApp {
   } else {
     try! FileManager.default.url(for: .libraryDirectory, in: .userDomainMask, appropriateFor: nil, create: false).appendingPathComponent("Rime", isDirectory: true)
   }
-  static let appDir = "/Library/Input Methods/Squirrel.app".withCString { dir in
-    URL(fileURLWithFileSystemRepresentation: dir, isDirectory: false, relativeTo: nil)
-  }
+  // The running bundle, so the input source registers from wherever it is installed
+  // (/Library/Input Methods or ~/Library/Input Methods).
+  static let appDir = URL(fileURLWithPath: Bundle.main.bundlePath, isDirectory: false)
   static let logDir = FileManager.default.temporaryDirectory.appending(component: "rime.squirrel", directoryHint: .isDirectory)
 
   // swiftlint:disable:next cyclomatic_complexity
