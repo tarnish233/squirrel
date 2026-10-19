@@ -88,6 +88,7 @@
 		B39771232BECEA150093A49B /* MacOSKeyCodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771222BECEA150093A49B /* MacOSKeyCodes.swift */; };
 		B39771252BED899F0093A49B /* SquirrelConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771242BED899F0093A49B /* SquirrelConfig.swift */; };
 		B39771272BED9B250093A49B /* SquirrelTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771262BED9B250093A49B /* SquirrelTheme.swift */; };
+		23B0C016185C0C964CDF8F77 /* SquirrelScrollMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9C001925A73F3D70B6586FD /* SquirrelScrollMode.swift */; };
 		B39771292BEDAF4A0093A49B /* SquirrelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771282BEDAF4A0093A49B /* SquirrelView.swift */; };
 		B397712B2BEE4C160093A49B /* SquirrelPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B397712A2BEE4C160093A49B /* SquirrelPanel.swift */; };
 		B397712D2BEEB39D0093A49B /* InputSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = B397712C2BEEB39D0093A49B /* InputSource.swift */; };
@@ -307,6 +308,7 @@
 		B39771222BECEA150093A49B /* MacOSKeyCodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MacOSKeyCodes.swift; path = sources/MacOSKeyCodes.swift; sourceTree = "<group>"; };
 		B39771242BED899F0093A49B /* SquirrelConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelConfig.swift; path = sources/SquirrelConfig.swift; sourceTree = "<group>"; };
 		B39771262BED9B250093A49B /* SquirrelTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelTheme.swift; path = sources/SquirrelTheme.swift; sourceTree = "<group>"; };
+		C9C001925A73F3D70B6586FD /* SquirrelScrollMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelScrollMode.swift; path = sources/SquirrelScrollMode.swift; sourceTree = "<group>"; };
 		B39771282BEDAF4A0093A49B /* SquirrelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelView.swift; path = sources/SquirrelView.swift; sourceTree = "<group>"; };
 		B397712A2BEE4C160093A49B /* SquirrelPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelPanel.swift; path = sources/SquirrelPanel.swift; sourceTree = "<group>"; };
 		B397712C2BEEB39D0093A49B /* InputSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = InputSource.swift; path = sources/InputSource.swift; sourceTree = "<group>"; };
@@ -343,6 +345,7 @@
 				B397712C2BEEB39D0093A49B /* InputSource.swift */,
 				B397712E2BEECBED0093A49B /* Main.swift */,
 				B39771262BED9B250093A49B /* SquirrelTheme.swift */,
+				C9C001925A73F3D70B6586FD /* SquirrelScrollMode.swift */,
 				B397712A2BEE4C160093A49B /* SquirrelPanel.swift */,
 				B39771282BEDAF4A0093A49B /* SquirrelView.swift */,
 				B39771242BED899F0093A49B /* SquirrelConfig.swift */,
@@ -616,6 +619,7 @@
 				B397712B2BEE4C160093A49B /* SquirrelPanel.swift in Sources */,
 				B38E9B912BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift in Sources */,
 				B39771272BED9B250093A49B /* SquirrelTheme.swift in Sources */,
+				23B0C016185C0C964CDF8F77 /* SquirrelScrollMode.swift in Sources */,
 				B35D2FE82BF00839009D156B /* BridgingFunctions.swift in Sources */,
 				B3A001022F260100009D156B /* ReservedProperty.swift in Sources */,
 			);

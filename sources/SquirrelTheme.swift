@@ -69,6 +69,7 @@ final class SquirrelTheme {
   private(set) var inlinePreedit = false
   private(set) var inlineCandidate = false
   private(set) var showPaging = false
+  private(set) var scrollSettings = SquirrelScrollSettings()
 
   private var fonts = [NSFont]()
   private var labelFonts = [NSFont]()
@@ -214,6 +215,11 @@ final class SquirrelTheme {
     mutualExclusive ?= config.getBool("style/mutual_exclusive")
     memorizeSize ?= config.getBool("style/memorize_size")
     showPaging ?= config.getBool("style/show_paging")
+    scrollSettings.enabled ?= config.getBool("style/scroll_mode/enable")
+    scrollSettings.maxRows ?= config.getDouble("style/scroll_mode/max_rows").map {
+      min(max(Int($0), SquirrelScrollSettings.rowLimit.lowerBound), SquirrelScrollSettings.rowLimit.upperBound)
+    }
+    scrollSettings.tabPaging ?= config.getBool("style/scroll_mode/tab_paging")
 
     statusMessageType ?= .init(rawValue: config.getString("style/status_message_type") ?? "")
     candidateFormat ?= config.getString("style/candidate_format")

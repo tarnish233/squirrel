@@ -44,6 +44,17 @@ style:
   translucency: false
   # Enable to show small arrows that indicates if paging up/down is possible
   show_paging: false
+  # Scroll mode (卷轴模式), for candidate_list_layout: linear with text_orientation: horizontal.
+  # Paging expands the single candidate row into a scrollable grid, one page per row:
+  # ←/→ move by candidate, ↑/↓ and the paging keys move by row keeping the column,
+  # digits select from the highlighted row, and ↑ on the first row collapses the grid.
+  scroll_mode:
+    enable: false
+    # Rows visible while expanded (2-20)
+    max_rows: 5
+    # Tab / Shift+Tab turn pages (rows) while candidates are shown, like WeType;
+    # Shift+Tab on the first row collapses the grid
+    tab_paging: true
 
   corner_radius: 7
   hilited_corner_radius: 0

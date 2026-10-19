@@ -32,6 +32,12 @@ final class SquirrelPanel: NSPanel {
   private var page: Int = 0
   private var lastPage: Bool = true
   private var pagingUp: Bool?
+  // Scroll mode: layout of the expanded grid, and column widths remembered for one expansion.
+  private var scrollLayout: SquirrelScrollLayout?
+  private var scrollColumnWidths: [CGFloat] = []
+  private var scrollGeneration: Int?
+  private var minimumTextWidth: CGFloat = 0
+  private var minimumContentWidth: CGFloat = 0
 
   init(position: NSRect) {
     self.position = position
@@ -62,6 +68,13 @@ final class SquirrelPanel: NSPanel {
   }
   var inlineCandidate: Bool {
     view.currentTheme.inlineCandidate
+  }
+  var scrollSettings: SquirrelScrollSettings {
+    view.currentTheme.scrollSettings
+  }
+  /// Scroll mode applies to the horizontal linear layout only.
+  var scrollModeActive: Bool {
+    scrollSettings.enabled && linear && !vertical
   }
 
   // swiftlint:disable:next cyclomatic_complexity
@@ -100,13 +113,15 @@ final class SquirrelPanel: NSPanel {
     case .mouseExited:
       acceptsMouseMovedEvents = false
       if cursorIndex != index {
-        update(preedit: preedit, selRange: selRange, caretPos: caretPos, candidates: candidates, comments: comments, labels: labels, highlighted: index, page: page, lastPage: lastPage, update: false)
+        update(preedit: preedit, selRange: selRange, caretPos: caretPos, candidates: candidates, comments: comments, labels: labels, highlighted: index, page: page, lastPage: lastPage,
+               scroll: scrollLayout, update: false)
       }
       pagingUp = nil
     case .mouseMoved:
       let (index, _, _) = view.click(at: mousePosition())
       if let index = index, cursorIndex != index && index >= 0 && index < candidates.count {
-        update(preedit: preedit, selRange: selRange, caretPos: caretPos, candidates: candidates, comments: comments, labels: labels, highlighted: index, page: page, lastPage: lastPage, update: false)
+        update(preedit: preedit, selRange: selRange, caretPos: caretPos, candidates: candidates, comments: comments, labels: labels, highlighted: index, page: page, lastPage: lastPage,
+               scroll: scrollLayout, update: false)
       }
     case .scrollWheel:
       if event.phase == .began {
@@ -150,8 +165,10 @@ final class SquirrelPanel: NSPanel {
   }
 
   // swiftlint:disable:next cyclomatic_complexity function_parameter_count
-  func update(preedit: String, selRange: NSRange, caretPos: Int, candidates: [String], comments: [String], labels: [String], highlighted index: Int, page: Int, lastPage: Bool, update: Bool) {
+  func update(preedit: String, selRange: NSRange, caretPos: Int, candidates: [String], comments: [String], labels: [String], highlighted index: Int, page: Int, lastPage: Bool,
+              scroll: SquirrelScrollLayout? = nil, update: Bool) {
     if update {
+      self.scrollLayout = scroll
       self.preedit = preedit
       self.selRange = selRange
       self.caretPos = caretPos
@@ -205,17 +222,25 @@ final class SquirrelPanel: NSPanel {
 
     var candidateRanges = [NSRange]()
     for i in 0..<candidates.count {
+      // In an expanded grid every row is one page: labels restart in each row, and only the
+      // highlighted row (librime's current page) shows them, since digit keys select from it.
+      let column = scroll.map { i % $0.rowSize } ?? i
+      let pageIndex: Int? = if let scroll { i / scroll.rowSize == scroll.highlightedRow ? column : nil } else { i }
       let attrs = i == index ? theme.highlightedAttrs : theme.attrs
-      let labelAttrs = i == index ? theme.labelHighlightedAttrs : theme.labelAttrs
+      var labelAttrs = i == index ? theme.labelHighlightedAttrs : theme.labelAttrs
+      if pageIndex == nil {
+        // Keep the label's width so columns stay aligned.
+        labelAttrs[.foregroundColor] = NSColor.clear
+      }
       let commentAttrs = i == index ? theme.commentHighlightedAttrs : theme.commentAttrs
 
       let label = if theme.candidateFormat.contains(/\[label\]/) {
-        if labels.count > 1 && i < labels.count {
-          labels[i]
-        } else if labels.count == 1 && i < labels.first!.count {
-          String(labels.first![labels.first!.index(labels.first!.startIndex, offsetBy: i)])
+        if labels.count > 1 && column < labels.count {
+          labels[column]
+        } else if labels.count == 1 && column < labels.first!.count {
+          String(labels.first![labels.first!.index(labels.first!.startIndex, offsetBy: column)])
         } else {
-          "\(i+1)"
+          "\(column+1)"
         }
       } else {
         ""
@@ -235,11 +260,11 @@ final class SquirrelPanel: NSPanel {
       for range in line.string.ranges(of: /\[comment\]/) {
         let convertedRange = convert(range: range, in: line.string)
         // Apply semantic accent/warning colors only for non-highlighted rows
-        if let inputController, !inputController.specialCommentIndices.isEmpty && i != index {
+        if let inputController, let pageIndex, !inputController.specialCommentIndices.isEmpty && i != index {
           var newCommentAttrs = commentAttrs
-          if let accent = inputController.specialCommentIndices[.commentHighlight], accent.contains(i) {
+          if let accent = inputController.specialCommentIndices[.commentHighlight], accent.contains(pageIndex) {
             newCommentAttrs[.foregroundColor] = theme.accentCommentTextColor
-          } else if let warning = inputController.specialCommentIndices[.commentWarning], warning.contains(i) {
+          } else if let warning = inputController.specialCommentIndices[.commentWarning], warning.contains(pageIndex) {
             newCommentAttrs[.foregroundColor] = theme.warningCommentTextColor
           }
           line.addAttributes(newCommentAttrs, range: convertedRange)
@@ -258,7 +283,13 @@ final class SquirrelPanel: NSPanel {
 
       let lineSeparator = NSAttributedString(string: linear ? "  " : "\n", attributes: attrs)
       if i > 0 {
-        text.append(lineSeparator)
+        if scroll != nil {
+          // Rows break with a line separator, staying in one paragraph like wrapped linear text;
+          // candidates in a row are aligned to columns with tab stops (see alignGrid).
+          text.append(NSAttributedString(string: column == 0 ? "\u{2028}" : "\t", attributes: attrs))
+        } else {
+          text.append(lineSeparator)
+        }
       }
       let str = lineSeparator.mutableCopy() as! NSMutableAttributedString
       if vertical {
@@ -285,9 +316,16 @@ final class SquirrelPanel: NSPanel {
     view.textView.textContentStorage?.attributedString = text
     view.textView.setLayoutOrientation(vertical ? .vertical : .horizontal)
 
-    // Force TextKit 2 layout before measuring wrapped text and highlight bounds.
-    let textWidth = maxTextWidth()
     let maxTextHeight = vertical ? screenRect.width - theme.edgeInset.width * 2 : screenRect.height - theme.edgeInset.height * 2
+    if let scroll {
+      alignGrid(scroll, text: text, candidateRanges: candidateRanges, maxTextHeight: maxTextHeight)
+    } else {
+      minimumTextWidth = 0
+      minimumContentWidth = 0
+    }
+
+    // Force TextKit 2 layout before measuring wrapped text and highlight bounds.
+    let textWidth = max(maxTextWidth(), minimumTextWidth)
     view.textContainer.size = NSSize(width: textWidth, height: maxTextHeight)
     view.textLayoutManager.ensureLayout(for: view.textLayoutManager.documentRange)
 
@@ -370,7 +408,7 @@ private extension SquirrelPanel {
 
     view.textView.textContainerInset = theme.edgeInset
 
-    var textWidth = maxTextWidth()
+    var textWidth = max(maxTextWidth(), minimumTextWidth)
     // Measure natural text height before constraining the panel.
     view.textContainer.size = NSSize(width: textWidth, height: .greatestFiniteMagnitude)
 
@@ -382,6 +420,8 @@ private extension SquirrelPanel {
     view.textView.bounds.origin = .zero
 
     var contentRect = view.contentRect
+    // An expanded grid keeps the width of its widest columns while scrolling.
+    contentRect.size.width = max(contentRect.width, minimumContentWidth)
 
     // Compute the largest size possible for a giant panel
     var naturalPanelSize = NSSize.zero
@@ -529,6 +569,8 @@ private extension SquirrelPanel {
   }
 
   func show(status message: String) {
+    minimumTextWidth = 0
+    minimumContentWidth = 0
     let theme = view.currentTheme
     let text = NSMutableAttributedString(string: message, attributes: theme.attrs)
     text.addAttribute(.paragraphStyle, value: theme.paragraphStyle, range: NSRange(location: 0, length: text.length))
@@ -542,6 +584,44 @@ private extension SquirrelPanel {
     statusTimer = Timer.scheduledTimer(withTimeInterval: SquirrelTheme.showStatusDuration, repeats: false) { _ in
       self.hide()
     }
+  }
+
+  /// Aligns the rows of an expanded grid into columns: measures every cell with an unbounded line
+  /// length, then sets tab stops at the widest cell of each column. Widths only grow during one
+  /// expansion, so the panel keeps its size while scrolling.
+  func alignGrid(_ scroll: SquirrelScrollLayout, text: NSMutableAttributedString, candidateRanges: [NSRange], maxTextHeight: CGFloat) {
+    guard let firstRange = candidateRanges.first, scroll.rowSize > 0 else { return }
+    if scrollGeneration != scroll.generation || scrollColumnWidths.count != scroll.rowSize {
+      scrollGeneration = scroll.generation
+      scrollColumnWidths = .init(repeating: 0, count: scroll.rowSize)
+    }
+    view.textContainer.size = NSSize(width: 100_000, height: maxTextHeight)
+    view.textLayoutManager.ensureLayout(for: view.textLayoutManager.documentRange)
+    for (i, range) in candidateRanges.enumerated() {
+      guard let textRange = view.convert(range: range) else { continue }
+      let column = i % scroll.rowSize
+      scrollColumnWidths[column] = max(scrollColumnWidths[column], ceil(view.contentRect(range: textRange).width))
+    }
+
+    let gap = view.separatorWidth
+    var tabStops = [NSTextTab]()
+    var location: CGFloat = 0
+    for width in scrollColumnWidths.dropLast() {
+      location += width + gap
+      tabStops.append(NSTextTab(textAlignment: .left, location: location))
+    }
+    let rowWidth = location + (scrollColumnWidths.last ?? 0)
+
+    let blockRange = NSRange(location: firstRange.location, length: text.length - firstRange.location)
+    let baseStyle = text.attribute(.paragraphStyle, at: firstRange.location, effectiveRange: nil) as? NSParagraphStyle ?? view.currentTheme.paragraphStyle
+    let style = baseStyle.mutableCopy() as! NSMutableParagraphStyle
+    style.tabStops = tabStops
+    style.defaultTabInterval = max(1, gap)
+    text.addAttribute(.paragraphStyle, value: style, range: blockRange)
+    view.textView.textContentStorage?.attributedString = text
+
+    minimumTextWidth = ceil(rowWidth + gap)
+    minimumContentWidth = rowWidth
   }
 
   func convert(range: Range<String.Index>, in string: String) -> NSRange {

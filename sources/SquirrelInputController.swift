@@ -27,6 +27,7 @@ final class SquirrelInputController: IMKInputController {
   private var chordTimer: Timer?
   private var chordDuration: TimeInterval = 0
   private var currentApp: String = ""
+  private var scroll = SquirrelScrollState()
 
   // swiftlint:disable:next cyclomatic_complexity
   override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
@@ -111,8 +112,12 @@ final class SquirrelInputController: IMKInputController {
                                                            caps: modifiers.contains(.capsLock))
         if rimeKeycode != 0 {
           let rimeModifiers = SquirrelKeycode.osxModifiersToRime(modifiers: modifiers)
-          handled = processKey(rimeKeycode, modifiers: rimeModifiers)
-          rimeUpdate()
+          if handleScrollKey(rimeKeycode, modifiers: rimeModifiers) {
+            handled = true
+          } else {
+            handled = processKey(rimeKeycode, modifiers: rimeModifiers)
+            rimeUpdate()
+          }
         }
       }
 
@@ -124,7 +129,12 @@ final class SquirrelInputController: IMKInputController {
   }
 
   func selectCandidate(_ index: Int) -> Bool {
-    let success = rimeAPI.select_candidate_on_current_page(session, index)
+    // An expanded grid shows several pages; map the displayed index to the global one.
+    let success = if let firstIndex = scroll.firstIndex {
+      rimeAPI.select_candidate(session, firstIndex + index)
+    } else {
+      rimeAPI.select_candidate_on_current_page(session, index)
+    }
     if success {
       rimeUpdate()
     }
@@ -133,6 +143,11 @@ final class SquirrelInputController: IMKInputController {
 
   // swiftlint:disable:next identifier_name
   func page(up: Bool) -> Bool {
+    if up && scroll.canCollapse {
+      scroll.collapse()
+      rimeUpdate()
+      return true
+    }
     var handled = false
     handled = rimeAPI.change_page(session, up)
     if handled {
@@ -434,6 +449,31 @@ private extension SquirrelInputController {
     return handled
   }
 
+  /// Scroll-mode keys, aligned with WeType: Tab / Shift+Tab turn pages (rows of the grid),
+  /// and moving up from the first row collapses the grid. Other keys go to librime.
+  func handleScrollKey(_ keycode: UInt32, modifiers: UInt32) -> Bool {
+    guard scroll.hasCandidates, let panel = NSApp.squirrelAppDelegate.panel, panel.scrollModeActive else { return false }
+    let shift = kShiftMask.rawValue
+    let mods = modifiers & (shift | kControlMask.rawValue | kAltMask.rawValue | kSuperMask.rawValue)
+    let tabPaging = panel.scrollSettings.tabPaging
+    switch Int32(keycode) {
+    case XK_Tab where tabPaging && mods == 0:
+      _ = processKey(UInt32(XK_Page_Down), modifiers: 0)
+    case XK_Tab where tabPaging && mods == shift, XK_ISO_Left_Tab where tabPaging && mods & ~shift == 0:
+      if scroll.canCollapse {
+        scroll.collapse()
+      } else {
+        _ = processKey(UInt32(XK_Page_Up), modifiers: 0)
+      }
+    case XK_Up where mods == 0 && scroll.canCollapse, XK_KP_Up where mods == 0 && scroll.canCollapse:
+      scroll.collapse()
+    default:
+      return false
+    }
+    rimeUpdate()
+    return true
+  }
+
   func rimeConsumeCommittedText() {
     var commitText = RimeCommit.rimeStructInit()
     if rimeAPI.get_commit(session, &commitText) {
@@ -548,13 +588,43 @@ private extension SquirrelInputController {
       // swiftlint:enable identifier_name
       let page = Int(ctx.menu.page_no)
       let lastPage = ctx.menu.is_last_page
+      var highlighted = Int(ctx.menu.highlighted_candidate_index)
+
+      // Scroll mode: show a window of pages (one per row) instead of the current page only.
+      var scrollLayout: SquirrelScrollLayout?
+      if numCandidates > 0, let panel = NSApp.squirrelAppDelegate.panel, panel.scrollModeActive {
+        let pageSize = max(1, Int(ctx.menu.page_size))
+        let input = rimeAPI.get_input(session).map { String(cString: $0) } ?? ""
+        let listKey = "\(input)\u{1F}\(ctx.composition.sel_start)\u{1F}\(rimeAPI.get_caret_pos(session))"
+        if let rows = scroll.update(listKey: listKey, page: page, lastPage: lastPage, maxRows: panel.scrollSettings.maxRows) {
+          let first = rows.lowerBound * pageSize
+          let capacity = rows.count * pageSize
+          // One extra candidate tells whether more rows follow.
+          let window = rimeAPI.candidates(of: session, from: first, count: capacity + 1)
+          let highlightedIndex = page * pageSize + highlighted - first
+          if highlightedIndex >= 0 && highlightedIndex < min(window.count, capacity) {
+            candidates = window.prefix(capacity).map(\.text)
+            comments = window.prefix(capacity).map(\.comment)
+            highlighted = highlightedIndex
+            scroll.show(from: first)
+            scrollLayout = SquirrelScrollLayout(rowSize: pageSize, highlightedRow: page - rows.lowerBound,
+                                                hasRowsAbove: rows.lowerBound > 0, hasRowsBelow: window.count > capacity,
+                                                generation: scroll.generation)
+          } else {
+            scroll.collapse()
+          }
+        }
+      } else {
+        scroll.reset()
+      }
 
       let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
       showPanel(preedit: inlinePreedit ? "" : preedit, selRange: selRange, caretPos: caretPos.utf16Offset(in: preedit),
-                candidates: candidates, comments: comments, labels: labels, highlighted: Int(ctx.menu.highlighted_candidate_index),
-                page: page, lastPage: lastPage)
+                candidates: candidates, comments: comments, labels: labels, highlighted: highlighted,
+                page: page, lastPage: lastPage, scroll: scrollLayout)
       _ = rimeAPI.free_context(&ctx)
     } else {
+      scroll.reset()
       hidePalettes()
     }
   }
@@ -606,7 +676,8 @@ private extension SquirrelInputController {
   }
 
   // swiftlint:disable:next function_parameter_count
-  func showPanel(preedit: String, selRange: NSRange, caretPos: Int, candidates: [String], comments: [String], labels: [String], highlighted: Int, page: Int, lastPage: Bool) {
+  func showPanel(preedit: String, selRange: NSRange, caretPos: Int, candidates: [String], comments: [String], labels: [String], highlighted: Int, page: Int, lastPage: Bool,
+                 scroll: SquirrelScrollLayout?) {
     guard let client = client else { return }
     var inputPos = NSRect()
     client.attributes(forCharacterIndex: 0, lineHeightRectangle: &inputPos)
@@ -614,7 +685,7 @@ private extension SquirrelInputController {
       panel.position = inputPos
       panel.inputController = self
       panel.update(preedit: preedit, selRange: selRange, caretPos: caretPos, candidates: candidates, comments: comments, labels: labels,
-                   highlighted: highlighted, page: page, lastPage: lastPage, update: true)
+                   highlighted: highlighted, page: page, lastPage: lastPage, scroll: scroll, update: true)
     }
   }
 
