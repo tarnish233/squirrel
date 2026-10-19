@@ -246,7 +246,7 @@ func runPreview() {
   func capture(_ name: String, settle: Double = 0.5) {
     RunLoop.main.run(until: Date().addingTimeInterval(settle))
     let caretLine = NSRect(x: caretRect.minX - 60, y: caretRect.minY, width: 60, height: caretRect.height)
-    let region = panel.frame.union(caretLine).insetBy(dx: -28, dy: -24).intersection(backdropFrame).integral
+    let region = panel.frame.union(caretLine).insetBy(dx: -28, dy: -24).intersection(backdrop.frame).integral
     guard onlyOwnWindows(in: region) else {
       print("  ✗ \(name) skipped: other windows are visible over the preview (another space or app in front?)")
       failures += 1
@@ -303,6 +303,27 @@ func runPreview() {
     type("123")
     capture("\(name)-3-comments")
     press(escape)
+    // Long candidates: one line as wide as needed, cut short only past the width limit.
+    let caret = caretRect
+    caretRect.origin.x = backdropFrame.minX + 40
+    // A wider backdrop for the wide grid.
+    let screenWidth = NSScreen.screens[0].frame.width
+    backdrop.setFrame(NSRect(x: backdropFrame.minX, y: backdropFrame.minY, width: min(1240, screenWidth - backdropFrame.minX - 8),
+                             height: backdropFrame.height), display: true)
+    type("macos")
+    capture("\(name)-6-long")
+    press(tab)
+    capture("\(name)-7-long-grid")
+    press(escape)
+    SquirrelPanel.rowWidthLimit = 600
+    type("macos")
+    capture("\(name)-8-cut")
+    press(tab)
+    capture("\(name)-9-cut-grid")
+    press(escape)
+    SquirrelPanel.rowWidthLimit = nil
+    caretRect = caret
+    backdrop.setFrame(backdropFrame, display: true)
   }
   // Motion: sample the window size while the grid expands and collapses.
   func sample(_ name: String, _ action: () -> Void) {
@@ -515,6 +536,67 @@ if let layout = s.layout {
   snapshot("hover-row3")
 }
 press(escape)
+
+print("== 13. rows stay on one line; past the width limit the widest candidates are cut short")
+let panelView: SquirrelView = field(panel, "view")!
+func lineCount() -> Int {
+  var lines = 0
+  panelView.textLayoutManager.enumerateTextLayoutFragments(from: panelView.textLayoutManager.documentRange.location, options: []) { fragment in
+    lines += fragment.textLineFragments.count
+    return true
+  }
+  return lines
+}
+func cellRects() -> [NSRect] {
+  panelView.candidateRanges.map { range in panelView.convert(range: range).map { panelView.contentRect(range: $0) } ?? .zero }
+}
+func shownCandidates() -> [String] {
+  let string = (panelView.textContentStorage.attributedString?.string ?? "") as NSString
+  return panelView.candidateRanges.map { string.substring(with: $0) }
+}
+let longInput = "zhonghuarenmingongheguowansui"
+type(longInput)
+let longRow = allCandidates(5)
+let naturalWidth = panelView.contentRect.width
+let cellWidths = cellRects().map(\.width).sorted(by: >)
+print("  natural row \(Int(naturalWidth)) pt, cells \(cellWidths.map { Int($0) }): \(shownCandidates())")
+check(lineCount() == 1, "the collapsed row is one line")
+press(escape)
+// Leave room for the widest cell only halfway down to the next widest.
+let rowLimit = (naturalWidth - (cellWidths[0] - cellWidths[1]) / 2).rounded(.down)
+SquirrelPanel.rowWidthLimit = rowLimit
+type(longInput)
+var shown = shownCandidates()
+print("  limited to \(Int(rowLimit)) pt: \(Int(panelView.contentRect.width)) pt \(shown)")
+check(lineCount() == 1, "still one line")
+check(panelView.contentRect.width <= rowLimit + 1, "the row fits the limit")
+check(shown.first?.contains("…") == true && shown.dropFirst().allSatisfy { !$0.contains("…") }, "only the widest candidate is cut short")
+/// Whether a shown cell is its candidate cut short at the end: the text before … starts the candidate.
+func isCutShort(_ cell: String, _ candidate: String) -> Bool {
+  guard let start = cell.range(of: String(candidate.prefix(1)))?.lowerBound, let end = cell.range(of: "…")?.lowerBound, start < end else { return false }
+  return candidate.hasPrefix(cell[start..<end])
+}
+check(shown.count == longRow.count && shown.indices.allSatisfy { i in
+  shown[i].hasPrefix("\(i + 1)") && (shown[i].contains(longRow[i]) || isCutShort(shown[i], longRow[i]))
+}, "cut short at the end, labels kept")
+press(tab)
+s = describe("Tab")
+shown = shownCandidates()
+let rows = s.candidates.count / max(1, s.layout?.rowSize ?? 1)
+let rects = cellRects()
+print("  grid \(Int(panelView.contentRect.width)) pt, \(rows) rows: \(shown)")
+check(lineCount() == rows, "every grid row is one line")
+check(panelView.contentRect.width <= rowLimit + 1, "the grid fits the limit")
+let rowSize = s.layout?.rowSize ?? 1
+check((0..<rowSize).allSatisfy { column in
+  let starts = stride(from: column, to: rects.count, by: rowSize).map { rects[$0].minX }
+  return (starts.max() ?? 0) - (starts.min() ?? 0) < 0.5
+}, "columns stay aligned")
+press(shiftTab)
+press(shiftTab)
+type("1")
+check(client.committed.last == longRow[0], "1 commits the whole candidate \(longRow[0]), got \(client.committed.last ?? "nil")")
+SquirrelPanel.rowWidthLimit = nil
 
 print("")
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) CHECK(S) FAILED")

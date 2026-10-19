@@ -57,6 +57,8 @@ style:
   # Paging expands the single candidate row into a scrollable grid, one page per row:
   # ←/→ move by candidate, ↑/↓ and the paging keys move by row keeping the column,
   # digits select from the highlighted row, and ↑ on the first row collapses the grid.
+  # Each row stays on one line, growing up to 90% of the screen width; past that, the widest
+  # candidates are cut short with an ellipsis.
   scroll_mode:
     enable: false
     # Rows visible while expanded (2-20)

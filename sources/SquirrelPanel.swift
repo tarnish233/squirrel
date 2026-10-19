@@ -44,6 +44,8 @@ final class SquirrelPanel: NSPanel {
   private var liquidGlassRadius: CGFloat = 0
   /// Slows frame transitions down, for tests.
   static var motionTimeScale = 1.0
+  /// Overrides the screen-based limit of a scroll-mode row's width, for tests.
+  static var rowWidthLimit: CGFloat?
 
   init(position: NSRect) {
     self.position = position
@@ -229,6 +231,8 @@ final class SquirrelPanel: NSPanel {
     }
 
     var candidateRanges = [NSRange]()
+    // Where each candidate's text starts in its line, after the label.
+    var labelLengths = [Int]()
     for i in 0..<candidates.count {
       // In an expanded grid every row is one page: labels restart in each row, and only the
       // highlighted row (librime's current page) shows them, since digit keys select from it.
@@ -285,14 +289,13 @@ final class SquirrelPanel: NSPanel {
       line.mutableString.replaceOccurrences(of: "[candidate]", with: candidate, range: NSRange(location: 0, length: line.length))
       line.mutableString.replaceOccurrences(of: "[comment]", with: comment, range: NSRange(location: 0, length: line.length))
       preferColorEmoji(in: line)
-      if theme.liquidGlass && !vertical, let labelEnd = labeledLine.string.firstMatch(of: /\[(candidate|comment)\]/)?.range.lowerBound {
+      let labelLength = labeledLine.string.firstMatch(of: /\[(candidate|comment)\]/).map { $0.range.lowerBound.utf16Offset(in: labeledLine.string) } ?? 0
+      labelLengths.append(labelLength)
+      if theme.liquidGlass && !vertical && labelLength > 0 {
         // Labels take a fixed width, so that every candidate starts at the same offset.
-        let labelLength = labelEnd.utf16Offset(in: labeledLine.string)
-        if labelLength > 0 {
-          let width = line.attributedSubstring(from: NSRange(location: 0, length: labelLength)).size().width
-          if width < theme.labelColumnWidth {
-            line.addAttribute(.kern, value: theme.labelColumnWidth - width, range: NSRange(location: labelLength - 1, length: 1))
-          }
+        let width = line.attributedSubstring(from: NSRange(location: 0, length: labelLength)).size().width
+        if width < theme.labelColumnWidth {
+          line.addAttribute(.kern, value: theme.labelColumnWidth - width, range: NSRange(location: labelLength - 1, length: 1))
         }
       }
 
@@ -347,8 +350,8 @@ final class SquirrelPanel: NSPanel {
     view.textView.setLayoutOrientation(vertical ? .vertical : .horizontal)
 
     let maxTextHeight = vertical ? screenRect.width - theme.edgeInset.width * 2 : screenRect.height - theme.edgeInset.height * 2
-    if let scroll {
-      alignGrid(scroll, text: text, candidateRanges: candidateRanges, maxTextHeight: maxTextHeight)
+    if scroll != nil || scrollModeActive {
+      layOutRows(scroll, text: text, candidateRanges: &candidateRanges, labelLengths: labelLengths, maxTextHeight: maxTextHeight)
     } else {
       minimumTextWidth = 0
       minimumContentWidth = 0
@@ -666,43 +669,161 @@ private extension SquirrelPanel {
     }
   }
 
-  /// Aligns the rows of an expanded grid into columns: measures every cell with an unbounded line
-  /// length, then sets tab stops at the widest cell of each column. Widths only grow during one
-  /// expansion, so the panel keeps its size while scrolling.
-  func alignGrid(_ scroll: SquirrelScrollLayout, text: NSMutableAttributedString, candidateRanges: [NSRange], maxTextHeight: CGFloat) {
-    guard let firstRange = candidateRanges.first, scroll.rowSize > 0 else { return }
-    if scrollGeneration != scroll.generation || scrollColumnWidths.count != scroll.rowSize {
+  /// Lays the candidates out the way scroll mode shows them, in rows of one line: the collapsed
+  /// row, or the rows of an expanded grid, aligned into columns with tab stops. A row grows as
+  /// wide as the screen allows instead of wrapping; past that, the widest cells are cut short with
+  /// an ellipsis. Cells are measured with an unbounded line length; grid columns only grow during
+  /// one expansion, so the panel keeps its size while scrolling.
+  func layOutRows(_ scroll: SquirrelScrollLayout?, text: NSMutableAttributedString, candidateRanges: inout [NSRange], labelLengths: [Int], maxTextHeight: CGFloat) {
+    let rowSize = scroll?.rowSize ?? candidateRanges.count
+    guard !candidateRanges.isEmpty, rowSize > 0 else {
+      minimumTextWidth = 0
+      minimumContentWidth = 0
+      view.gridColumnWidths = []
+      return
+    }
+    if let scroll, scrollGeneration != scroll.generation || scrollColumnWidths.count != rowSize {
       scrollGeneration = scroll.generation
-      scrollColumnWidths = .init(repeating: 0, count: scroll.rowSize)
+      scrollColumnWidths = .init(repeating: 0, count: rowSize)
     }
-    view.textContainer.size = NSSize(width: 100_000, height: maxTextHeight)
-    view.textLayoutManager.ensureLayout(for: view.textLayoutManager.documentRange)
-    for (i, range) in candidateRanges.enumerated() {
-      guard let textRange = view.convert(range: range) else { continue }
-      let column = i % scroll.rowSize
-      scrollColumnWidths[column] = max(scrollColumnWidths[column], ceil(view.contentRect(range: textRange).width), scrollSettings.columnWidth)
+    func measureCells() -> [CGFloat] {
+      view.textContainer.size = NSSize(width: 100_000, height: maxTextHeight)
+      view.textLayoutManager.ensureLayout(for: view.textLayoutManager.documentRange)
+      return candidateRanges.map { range in
+        view.convert(range: range).map { ceil(view.contentRect(range: $0).width) } ?? 0
+      }
     }
-    view.gridColumnWidths = scrollColumnWidths
+    func widestInColumns(_ cells: [CGFloat]) -> [CGFloat] {
+      var columns = [CGFloat](repeating: 0, count: rowSize)
+      for (i, width) in cells.enumerated() {
+        columns[i % rowSize] = max(columns[i % rowSize], width)
+      }
+      return columns
+    }
 
+    var cells = measureCells()
+    var columns = widestInColumns(cells)
+    if scroll != nil {
+      for column in 0..<rowSize {
+        scrollColumnWidths[column] = max(scrollColumnWidths[column], columns[column], scrollSettings.columnWidth)
+      }
+      columns = scrollColumnWidths
+    }
     let gap = view.separatorWidth
-    var tabStops = [NSTextTab]()
-    var location: CGFloat = 0
-    for width in scrollColumnWidths.dropLast() {
-      location += width + gap
-      tabStops.append(NSTextTab(textAlignment: .left, location: location))
+    let gaps = gap * CGFloat(rowSize - 1)
+    let maxWidth = maxRowWidth()
+    if columns.reduce(0, +) + gaps > maxWidth {
+      // Too wide even for the screen: cap the cells at the width that fits, the widest first.
+      let cellLimit = max(Self.waterLevel(columns, total: maxWidth - gaps), view.currentTheme.font.pointSize * 4)
+      for i in candidateRanges.indices.reversed() where cells[i] > cellLimit {
+        let change = truncate(text, range: candidateRanges[i], labelLength: labelLengths[i], to: cellLimit)
+        candidateRanges[i].length += change
+        for later in candidateRanges.indices where later > i {
+          candidateRanges[later].location += change
+        }
+      }
+      view.textView.textContentStorage?.attributedString = text
+      cells = measureCells()
+      let truncatedColumns = widestInColumns(cells)
+      columns = if scroll != nil {
+        // Columns keep their width, capped, so that the grid does not jump while scrolling.
+        zip(scrollColumnWidths, truncatedColumns).map { max(min($0, cellLimit), $1) }
+      } else {
+        truncatedColumns
+      }
     }
-    let rowWidth = location + (scrollColumnWidths.last ?? 0)
+    let rowWidth = columns.reduce(0, +) + gaps
 
-    let blockRange = NSRange(location: firstRange.location, length: text.length - firstRange.location)
-    let baseStyle = text.attribute(.paragraphStyle, at: firstRange.location, effectiveRange: nil) as? NSParagraphStyle ?? view.currentTheme.paragraphStyle
-    let style = baseStyle.mutableCopy() as! NSMutableParagraphStyle
-    style.tabStops = tabStops
-    style.defaultTabInterval = max(1, gap)
-    text.addAttribute(.paragraphStyle, value: style, range: blockRange)
-    view.textView.textContentStorage?.attributedString = text
-
+    if scroll != nil, let firstRange = candidateRanges.first {
+      view.gridColumnWidths = columns
+      var tabStops = [NSTextTab]()
+      var location: CGFloat = 0
+      for width in columns.dropLast() {
+        location += width + gap
+        tabStops.append(NSTextTab(textAlignment: .left, location: location))
+      }
+      let blockRange = NSRange(location: firstRange.location, length: text.length - firstRange.location)
+      let baseStyle = text.attribute(.paragraphStyle, at: firstRange.location, effectiveRange: nil) as? NSParagraphStyle ?? view.currentTheme.paragraphStyle
+      let style = baseStyle.mutableCopy() as! NSMutableParagraphStyle
+      style.tabStops = tabStops
+      style.defaultTabInterval = max(1, gap)
+      text.addAttribute(.paragraphStyle, value: style, range: blockRange)
+      view.textView.textContentStorage?.attributedString = text
+      minimumContentWidth = rowWidth
+    } else {
+      view.gridColumnWidths = []
+      minimumContentWidth = 0
+    }
+    // The line is a little longer than the row, so that the row never wraps.
     minimumTextWidth = ceil(rowWidth + gap)
-    minimumContentWidth = rowWidth
+  }
+
+  /// The widest a scroll-mode row may grow: most of the screen width.
+  func maxRowWidth() -> CGFloat {
+    if let limit = Self.rowWidthLimit {
+      return limit
+    }
+    let theme = view.currentTheme
+    return floor(screenRect.width * 0.9) - theme.edgeInset.width * 2 - theme.pagingOffset
+  }
+
+  /// The largest width for which the widths, each capped at it, add up to no more than total.
+  static func waterLevel(_ widths: [CGFloat], total: CGFloat) -> CGFloat {
+    var remaining = total
+    let sorted = widths.sorted()
+    for (i, width) in sorted.enumerated() {
+      let rest = CGFloat(sorted.count - i)
+      if width * rest > remaining {
+        return remaining / rest
+      }
+      remaining -= width
+    }
+    return sorted.last ?? total
+  }
+
+  /// Cuts the candidate (and its comment) at `range` in `text` short to fit `width`, keeping its
+  /// label: drops whole characters from the end and adds an ellipsis. Returns the change in length.
+  func truncate(_ text: NSMutableAttributedString, range: NSRange, labelLength: Int, to width: CGFloat) -> Int {
+    let line = text.attributedSubstring(from: range)
+    let string = line.string as NSString
+    // Trailing spaces (the format's space before an empty comment) stay after the ellipsis.
+    var end = string.length
+    while end > labelLength && string.character(at: end - 1) == 0x20 {
+      end -= 1
+    }
+    guard labelLength < end else { return 0 }
+    // Where each character after the label starts: keeping n characters ends at starts[n].
+    var starts = [Int]()
+    string.enumerateSubstrings(in: NSRange(location: labelLength, length: end - labelLength), options: .byComposedCharacterSequences) { _, characterRange, _, _ in
+      starts.append(characterRange.location)
+    }
+    guard starts.count > 1 else { return 0 }
+    let tail = line.attributedSubstring(from: NSRange(location: end, length: string.length - end))
+    func shortened(keeping count: Int) -> NSAttributedString {
+      var keep = starts[count]
+      while keep > labelLength && string.character(at: keep - 1) == 0x20 {
+        keep -= 1
+      }
+      let result = NSMutableAttributedString(attributedString: line.attributedSubstring(from: NSRange(location: 0, length: keep)))
+      var attrs = line.attributes(at: keep > labelLength ? keep - 1 : labelLength, effectiveRange: nil)
+      attrs[.kern] = nil
+      result.append(NSAttributedString(string: "…", attributes: attrs))
+      result.append(tail)
+      return result
+    }
+    // The most characters that fit, at least one.
+    var low = 1, high = starts.count - 1
+    while low < high {
+      let middle = (low + high + 1) / 2
+      if shortened(keeping: middle).size().width <= width {
+        low = middle
+      } else {
+        high = middle - 1
+      }
+    }
+    let result = shortened(keeping: low)
+    text.replaceCharacters(in: range, with: result)
+    return result.length - range.length
   }
 
   func convert(range: Range<String.Index>, in string: String) -> NSRange {
