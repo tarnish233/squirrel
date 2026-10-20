@@ -93,7 +93,21 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
     }
   }
 
-  /// Tells the settings app how a deploy ended: success, failure or unchanged.
+  /// Rebuilds build/squirrel.yaml from squirrel.yaml and squirrel.custom.yaml, and reloads the look,
+  /// without restarting Rime: input sessions, and whatever is being typed, stay. The settings app
+  /// asks for this when only the look changed. Its own cached copy of the config goes first, or
+  /// reading it again would return the old data.
+  func reloadStyle() {
+    print("Reloading the style.")
+    config?.close()
+    let deployed = rimeAPI.deploy_config_file("squirrel.yaml", "config_version")
+    loadSettings()
+    // Input controllers work out their schema's style and the inline options again.
+    NotificationCenter.default.post(name: .squirrelStyleDidReload, object: nil)
+    deployFinished(deployed ? "reloaded" : "failure")
+  }
+
+  /// Tells the settings app how a deploy ended: success, failure, unchanged, or reloaded (the look only).
   func deployFinished(_ outcome: String) {
     quietDeploy = false
     DistributedNotificationCenter.default().postNotificationName(.init("SquirrelDeployDidFinishNotification"), object: outcome, userInfo: nil, deliverImmediately: true)
@@ -445,9 +459,16 @@ private extension SquirrelApplicationDelegate {
     self.shutdownRime()
   }
 
+  /// The object says how: nil deploys, as the menu does; "quiet" deploys without the start and
+  /// success notifications; "style" reloads only the look (reloadStyle).
   func rimeNeedsReload(_ notification: Notification) {
+    let request = notification.object as? String
+    if request == "style" {
+      reloadStyle()
+      return
+    }
     print("Reloading rime on demand.")
-    quietDeploy = (notification.object as? String) == "quiet"
+    quietDeploy = request == "quiet"
     self.deploy()
   }
 
@@ -487,4 +508,9 @@ extension NSApplication {
   var squirrelAppDelegate: SquirrelApplicationDelegate {
     self.delegate as! SquirrelApplicationDelegate
   }
+}
+
+extension Notification.Name {
+  /// Posted in this process after reloadStyle.
+  static let squirrelStyleDidReload = Notification.Name("SquirrelStyleDidReload")
 }

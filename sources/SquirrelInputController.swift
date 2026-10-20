@@ -19,6 +19,7 @@ final class SquirrelInputController: IMKInputController {
   private var lastModifiers: NSEvent.ModifierFlags = .init()
   private var session: RimeSessionId = 0
   private var schemaId: String = ""
+  private var styleObserver: NSObjectProtocol?
   private var inlinePreedit = false
   private var inlineCandidate = false
   private var chordKeyCodes: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
@@ -231,6 +232,12 @@ final class SquirrelInputController: IMKInputController {
     ) { [weak self] notification in
       self?.reportASCIIMode(notification)
     }
+
+    // The look was reloaded without restarting Rime: on the next update, apply the schema's style
+    // and work out the inline options again, as after a schema change.
+    styleObserver = NotificationCenter.default.addObserver(forName: .squirrelStyleDidReload, object: nil, queue: nil) { [weak self] _ in
+      self?.schemaId = ""
+    }
   }
 
   override func deactivateServer(_ sender: Any!) {
@@ -329,6 +336,9 @@ final class SquirrelInputController: IMKInputController {
   }
 
   deinit {
+    if let styleObserver {
+      NotificationCenter.default.removeObserver(styleObserver)
+    }
     destroySession()
   }
 }
